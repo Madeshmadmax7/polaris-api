@@ -160,25 +160,32 @@ class Document(Base):
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     filename = Column(String(255), nullable=False)
     file_type = Column(String(50), default="pdf")
-    chunk_count = Column(Integer, default=0)
-    faiss_index_path = Column(String(500))
+    content = Column(Text, nullable=True)  # Full extracted text
     created_at = Column(DateTime, default=utcnow)
 
     user = relationship("User", back_populates="documents")
-    chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 
 
-class DocumentChunk(Base):
-    """Individual text chunks extracted from uploaded documents."""
-    __tablename__ = "document_chunks"
+class ChapterProgress(Base):
+    """Tracks completion of study plan chapters (YouTube videos)."""
+    __tablename__ = "chapter_progress"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
-    document_id = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
-    chunk_index = Column(Integer, nullable=False)
-    content = Column(Text, nullable=False)
-    chunk_metadata = Column(JSON, default=dict)
+    study_plan_id = Column(String(36), ForeignKey("study_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    chapter_index = Column(Integer, nullable=False)
+    chapter_title = Column(String(255), nullable=False)
+    youtube_url = Column(String(500), nullable=True)
+    is_completed = Column(Boolean, default=False)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
 
-    document = relationship("Document", back_populates="chunks")
+    study_plan = relationship("StudyPlan")
+    user = relationship("User")
+
+    __table_args__ = (
+        Index("idx_chapter_progress", "study_plan_id", "chapter_index", unique=True),
+    )
 
 
 class StudyPlan(Base):
@@ -188,9 +195,10 @@ class StudyPlan(Base):
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title = Column(String(255), nullable=False)
     goal = Column(Text)
-    plan_data = Column(JSON, nullable=False)  # Structured plan from AI
+    plan_data = Column(JSON, nullable=False)  # Contains: chapters (with YouTube links) + quiz
     duration_days = Column(Integer)
     document_id = Column(String(36), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    quiz_unlocked = Column(Boolean, default=False)  # Unlocked after all chapters completed
     created_at = Column(DateTime, default=utcnow)
 
     user = relationship("User", back_populates="study_plans")

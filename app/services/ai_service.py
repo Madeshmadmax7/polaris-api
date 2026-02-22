@@ -1,7 +1,7 @@
 """
-LifeOS – AI Service
-Handles communication with LLM providers (OpenAI / Groq).
-All AI calls go through backend only — extension never calls AI directly.
+LifeOS – AI Service (Unified Learning Flow)
+Single API call generates: YouTube chapters + quiz questions.
+No standalone quiz generation - integrated with study plans.
 """
 
 import json
@@ -9,7 +9,7 @@ from typing import Optional, List
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
-from app.services.rag_service import retrieve_context_for_query
+from app.services.rag_service import get_document_content
 
 # Lazy-loaded clients
 _openai_client = None
@@ -32,7 +32,7 @@ def _get_ai_client():
         return _openai_client, "openai"
 
 
-def _call_llm(messages: List[dict], temperature: float = 0.7, max_tokens: int = 2000) -> str:
+def _call_llm(messages: List[dict], temperature: float = 0.7, max_tokens: int = 4000) -> str:
     """Unified LLM call for both providers."""
     client, provider = _get_ai_client()
 
@@ -49,10 +49,10 @@ def _call_llm(messages: List[dict], temperature: float = 0.7, max_tokens: int = 
 
 
 # ═══════════════════════════════════════════════════════════
-#  STUDY PLAN GENERATION
+#  UNIFIED STUDY PLAN + QUIZ GENERATION
 # ═══════════════════════════════════════════════════════════
 
-def generate_study_plan(
+def generate_study_plan_with_quiz(
     db: Session,
     user_id: str,
     goal: str,
@@ -60,74 +60,131 @@ def generate_study_plan(
     document_id: Optional[str] = None,
 ) -> dict:
     """
-    Generate a structured study plan using RAG-grounded AI.
-    Retrieves relevant syllabus context to reduce hallucination.
+    UNIFIED API CALL: Generate complete learning path in one go.
+    
+    Returns JSON with:
+    - chapters: List of topics with YouTube video links
+    - quiz: 5-10 MCQ questions to test understanding
+    - metadata: Title, overview, etc.
     """
-    # Retrieve context from uploaded documents
-    context = ""
+    # Get PDF content if available
+    pdf_content = ""
     if document_id:
-        context = retrieve_context_for_query(db, user_id, goal, document_id)
+        pdf_content = get_document_content(db, document_id) or ""
 
     context_section = ""
-    if context:
+    if pdf_content:
+        # Truncate if too long (keep first ~4000 chars)
+        truncated_content = pdf_content[:4000]
+        if len(pdf_content) > 4000:
+            truncated_content += "\n... [content truncated]"
+        
         context_section = f"""
-## SYLLABUS CONTEXT (from uploaded documents):
-{context}
+## PDF CONTEXT (from uploaded document):
+{truncated_content}
 
-Use this context to ground your study plan. Only include topics that appear in the syllabus.
+Base your study plan on this content. Extract key topics and find relevant YouTube videos.
 """
 
-    system_prompt = """You are an expert academic planner and tutor. 
-Create structured, actionable study plans grounded in the provided syllabus content.
-Always respond in valid JSON format."""
+    system_prompt = """You are an expert educational consultant and YouTube content curator.
+Your job is to create study plans with curated YouTube video chapters and assessment quizzes.
 
-    user_prompt = f"""Create a detailed study plan for the following goal:
+CRITICAL: Respond ONLY with a valid JSON object. No markdown formatting, no code blocks."""
+
+    user_prompt = f"""Create a complete learning plan for this goal:
 
 **Goal:** {goal}
 **Duration:** {duration_days} days
 
 {context_section}
 
-Respond with a JSON object containing:
+Respond with this EXACT JSON structure (no markdown, no code blocks):
+
 {{
-    "title": "Short title for this plan",
-    "overview": "Brief overview of the plan",
-    "daily_plan": [
+    "title": "Concise title for the plan",
+    "overview": "Brief 2-3 sentence overview",
+    "chapters": [
         {{
-            "day": 1,
-            "topic": "Topic name",
-            "subtopics": ["Sub1", "Sub2"],
-            "estimated_hours": 2,
-            "resources": ["Resource suggestions"],
-            "goals": ["What to achieve"],
-            "is_revision": false
+            "chapter_number": 1,
+            "title": "Chapter title",
+            "description": "What this chapter covers",
+            "youtube_url": "https://www.youtube.com/watch?v=ACTUAL_VIDEO_ID",
+            "duration_estimate": "15 min",
+            "key_topics": ["Topic 1", "Topic 2"]
         }}
     ],
-    "revision_strategy": "How to handle revision cycles",
-    "milestones": [
-        {{"day": 7, "milestone": "Complete Chapter 1-3"}}
+    "quiz": [
+        {{
+            "question": "Full question text",
+            "options": ["Option A", "Option B", "Option C", "Option D"],
+            "correct_answer": 0,
+            "explanation": "Why this answer is correct"
+        }}
     ]
 }}
 
-Include revision days every 5-7 days. Adapt difficulty progressively.
-Ensure topic allocation covers the entire syllabus if provided."""
+REQUIREMENTS:
+1. Generate 3-8 chapters based on content complexity
+2. YouTube URLs MUST be real educational videos (use popular channels: Khan Academy, 3Blue1Brown, CrashCourse, freeCodeCamp, etc.)
+3. Generate 5-10 quiz questions covering all chapters
+4. Quiz questions should test understanding, not just recall
+5. Each question has 4 options, correct_answer is index (0-3)
+
+Be specific with YouTube video recommendations - use actual video IDs from educational channels."""
 
     response = _call_llm([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
-    ], temperature=0.5, max_tokens=4000)
+    ], temperature=0.6, max_tokens=4000)
 
     # Parse JSON response
     try:
-        # Try to extract JSON from response
-        json_start = response.find("{")
-        json_end = response.rfind("}") + 1
-        if json_start >= 0 and json_end > json_start:
-            plan = json.loads(response[json_start:json_end])
-        else:
-            plan = {"title": goal, "raw_response": response, "daily_plan": []}
-    except json.JSONDecodeError:
-        plan = {"title": goal, "raw_response": response, "daily_plan": []}
+        # Remove markdown code blocks if present
+        clean_response = response.strip()
+        if clean_response.startswith("```"):
+            clean_response = clean_response.split("```")[1]
+            if clean_response.startswith("json"):
+                clean_response = clean_response[4:]
+        clean_response = clean_response.strip()
+        
+        plan = json.loads(clean_response)
+        
+        # Validate structure
+        if "chapters" not in plan:
+            plan["chapters"] = []
+        if "quiz" not in plan:
+            plan["quiz"] = []
+        if "title" not in plan:
+            plan["title"] = goal[:100]
+        if "overview" not in plan:
+            plan["overview"] = f"Study plan for {goal}"
+            
+    except json.JSONDecodeError as e:
+        # Fallback structure
+        plan = {
+            "title": goal[:100],
+            "overview": f"Study plan for {goal}",
+            "chapters": [
+                {
+                    "chapter_number": 1,
+                    "title": "Introduction",
+                    "description": "Getting started with the topic",
+                    "youtube_url": "",
+                    "duration_estimate": "10 min",
+                    "key_topics": ["Basics"]
+                }
+            ],
+            "quiz": [
+                {
+                    "question": "This is a placeholder question",
+                    "options": ["A", "B", "C", "D"],
+                    "correct_answer": 0,
+                    "explanation": "AI generation failed, please try again"
+                }
+            ],
+            "error": f"Failed to parse AI response: {str(e)}",
+            "raw_response": response[:500]
+        }
 
     return plan
 

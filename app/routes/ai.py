@@ -1,6 +1,6 @@
 """
-LifeOS – AI & RAG Routes
-Document upload, study plan generation, quiz engine, RAG queries.
+LifeOS – AI & Learning Routes (Unified Flow)
+Document upload → Study plan with YouTube chapters → Chapter completion → Quiz
 """
 
 import os
@@ -10,21 +10,19 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Body
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
-from app.models.models import User, StudyPlan, QuizAttempt
+from app.models.models import User, StudyPlan, ChapterProgress, QuizAttempt
 from app.schemas.schemas import (
-    DocumentResponse, RAGQueryRequest, RAGQueryResponse,
+    DocumentResponse,
     StudyPlanRequest, StudyPlanResponse,
-    QuizGenerateRequest, QuizSubmitRequest, QuizResponse,
+    QuizSubmitRequest, QuizResponse,
 )
 from app.utils.auth import get_current_user
 from app.services.rag_service import process_document
-from app.services.ai_service import (
-    generate_study_plan, generate_quiz, rag_query,
-)
+from app.services.ai_service import generate_study_plan_with_quiz
 
 router = APIRouter(prefix="/ai", tags=["AI & Learning"])
 
@@ -41,7 +39,7 @@ async def upload_document(
 ):
     """
     Upload a syllabus/curriculum PDF.
-    Processes: PDF → chunks → embeddings → FAISS index.
+    Fast extraction: PDF → text only (no embeddings/FAISS).
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -80,20 +78,8 @@ def list_documents(
 #  RAG QUERY
 # ═══════════════════════════════════════════════════════════
 
-@router.post("/query", response_model=RAGQueryResponse)
-async def query_documents(
-    data: RAGQueryRequest,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Query uploaded documents using RAG."""
-    # Run blocking RAG query (embedding + FAISS search) in thread pool
-    result = await asyncio.to_thread(rag_query, db, user.id, data.query, data.document_id, data.top_k)
-    return RAGQueryResponse(**result)
-
-
 # ═══════════════════════════════════════════════════════════
-#  STUDY PLAN
+#  STUDY PLAN (with YouTube Chapters + Quiz)
 # ═══════════════════════════════════════════════════════════
 
 @router.post("/study-plan", response_model=StudyPlanResponse, status_code=201)
@@ -102,10 +88,13 @@ async def create_study_plan(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Generate a RAG-grounded study plan."""
+    """
+    Generate complete study plan with YouTube chapters + quiz.
+    SINGLE API CALL - returns chapters with video links and quiz questions.
+    """
     # Run blocking LLM API call in thread pool
     plan_data = await asyncio.to_thread(
-        generate_study_plan, db, user.id, data.goal, data.duration_days, data.document_id
+        generate_study_plan_with_quiz, db, user.id, data.goal, data.duration_days, data.document_id
     )
 
     plan = StudyPlan(
@@ -115,11 +104,26 @@ async def create_study_plan(
         plan_data=plan_data,
         duration_days=data.duration_days,
         document_id=data.document_id,
+        quiz_unlocked=False,  # Will unlock after all chapters completed
     )
     db.add(plan)
     db.commit()
     db.refresh(plan)
-
+    
+    # Create chapter progress tracking entries
+    chapters = plan_data.get("chapters", [])
+    for chapter in chapters:
+        chapter_progress = ChapterProgress(
+            study_plan_id=plan.id,
+            user_id=user.id,
+            chapter_index=chapter.get("chapter_number", 0),
+            chapter_title=chapter.get("title", ""),
+            youtube_url=chapter.get("youtube_url", ""),
+            is_completed=False,
+        )
+        db.add(chapter_progress)
+    
+    db.commit()
     return StudyPlanResponse.model_validate(plan)
 
 
@@ -141,108 +145,183 @@ def get_study_plan(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Get a specific study plan."""
+    """Get a specific study plan with progress."""
     plan = db.query(StudyPlan).filter(
         StudyPlan.id == plan_id,
         StudyPlan.user_id == user.id,
     ).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Study plan not found")
+    
+    # Add chapter progress info
+    progress = db.query(ChapterProgress).filter(
+        ChapterProgress.study_plan_id == plan_id,
+        ChapterProgress.user_id == user.id
+    ).all()
+    
+    # Inject progress into plan_data
+    plan_dict = plan.plan_data.copy() if isinstance(plan.plan_data, dict) else {}
+    if "chapters" in plan_dict:
+        for chapter in plan_dict["chapters"]:
+            chapter_num = chapter.get("chapter_number", 0)
+            prog = next((p for p in progress if p.chapter_index == chapter_num), None)
+            chapter["is_completed"] = prog.is_completed if prog else False
+            chapter["completed_at"] = prog.completed_at.isoformat() if prog and prog.completed_at else None
+    
+    # Check if all chapters completed → unlock quiz
+    if progress:
+        all_completed = all(p.is_completed for p in progress)
+        if all_completed and not plan.quiz_unlocked:
+            plan.quiz_unlocked = True
+            db.commit()
+    
     return StudyPlanResponse.model_validate(plan)
 
 
 # ═══════════════════════════════════════════════════════════
-#  QUIZ ENGINE
+#  CHAPTER COMPLETION TRACKING
 # ═══════════════════════════════════════════════════════════
 
-@router.post("/quiz/generate", response_model=QuizResponse, status_code=201)
-async def create_quiz(
-    data: QuizGenerateRequest,
+@router.post("/study-plan/{plan_id}/chapter/{chapter_number}/complete")
+def mark_chapter_complete(
+    plan_id: str,
+    chapter_number: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """
-    Generate a quiz with context from RAG.
-    Requires minimum focus time validation (checked server-side).
-    """
-    topic = data.topic or "General review"
+    """Mark a chapter as completed."""
+    progress = db.query(ChapterProgress).filter(
+        ChapterProgress.study_plan_id == plan_id,
+        ChapterProgress.user_id == user.id,
+        ChapterProgress.chapter_index == chapter_number,
+    ).first()
+    
+    if not progress:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+    
+    if not progress.is_completed:
+        progress.is_completed = True
+        progress.completed_at = datetime.now(timezone.utc)
+        db.commit()
+    
+    # Check if all chapters completed
+    all_progress = db.query(ChapterProgress).filter(
+        ChapterProgress.study_plan_id == plan_id,
+        ChapterProgress.user_id == user.id
+    ).all()
+    
+    all_completed = all(p.is_completed for p in all_progress)
+    
+    # Unlock quiz if all done
+    if all_completed:
+        plan = db.query(StudyPlan).filter(StudyPlan.id == plan_id).first()
+        if plan and not plan.quiz_unlocked:
+            plan.quiz_unlocked = True
+            db.commit()
+    
+    return {
+        "success": True,
+        "chapter_completed": True,
+        "all_chapters_completed": all_completed,
+        "quiz_unlocked": all_completed
+    }
 
-    # Generate quiz questions (blocking LLM API call, run in thread pool)
-    quiz_data = await asyncio.to_thread(
-        generate_quiz, db, user.id, topic, data.difficulty.value, data.document_id
-    )
 
-    # Create quiz attempt record
-    attempt = QuizAttempt(
-        user_id=user.id,
-        study_plan_id=data.study_plan_id,
-        questions=quiz_data.get("questions", []),
-        difficulty=data.difficulty.value,
-    )
-    db.add(attempt)
-    db.commit()
-    db.refresh(attempt)
+@router.get("/study-plan/{plan_id}/progress")
+def get_chapter_progress(
+    plan_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get progress for all chapters in a study plan."""
+    progress = db.query(ChapterProgress).filter(
+        ChapterProgress.study_plan_id == plan_id,
+        ChapterProgress.user_id == user.id
+    ).order_by(ChapterProgress.chapter_index).all()
+    
+    return {
+        "chapters": [
+            {
+                "chapter_index": p.chapter_index,
+                "chapter_title": p.chapter_title,
+                "youtube_url": p.youtube_url,
+                "is_completed": p.is_completed,
+                "completed_at": p.completed_at.isoformat() if p.completed_at else None
+            }
+            for p in progress
+        ],
+        "total_chapters": len(progress),
+        "completed_chapters": sum(1 for p in progress if p.is_completed)
+    }
 
-    return QuizResponse.model_validate(attempt)
 
+# ═══════════════════════════════════════════════════════════
+#  QUIZ (Unlocked After Chapters)
+# ═══════════════════════════════════════════════════════════
 
-@router.post("/quiz/submit")
+@router.post("/study-plan/{plan_id}/quiz/submit")
 def submit_quiz(
-    data: QuizSubmitRequest,
+    plan_id: str,
+    answers: dict = Body(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Submit quiz answers and get score."""
-    attempt = db.query(QuizAttempt).filter(
-        QuizAttempt.id == data.quiz_id,
-        QuizAttempt.user_id == user.id,
+    plan = db.query(StudyPlan).filter(
+        StudyPlan.id == plan_id,
+        StudyPlan.user_id == user.id
     ).first()
-    if not attempt:
-        raise HTTPException(status_code=404, detail="Quiz not found")
-
-    # Auto-grade MCQs
+    
+    if not plan:
+        raise HTTPException(status_code=404, detail="Study plan not found")
+    
+    if not plan.quiz_unlocked:
+        raise HTTPException(status_code=403, detail="Complete all chapters first to unlock quiz")
+    
+    quiz_questions = plan.plan_data.get("quiz", [])
+    if not quiz_questions:
+        raise HTTPException(status_code=404, detail="No quiz found in this plan")
+    
+    # Auto-grade
     score = 0
-    max_score = 0
     results = []
-
-    for q in attempt.questions:
-        q_id = str(q.get("id", ""))
-        q_type = q.get("type", "")
-
-        if q_type == "mcq":
-            max_score += 1
-            user_answer = data.answers.get(q_id)
-            correct = q.get("correct")
-            is_correct = str(user_answer) == str(correct)
-            if is_correct:
-                score += 1
-            results.append({
-                "id": q_id,
-                "correct": is_correct,
-                "explanation": q.get("explanation", ""),
-            })
-        elif q_type in ("conceptual", "coding"):
-            max_score += 2  # Worth more
-            results.append({
-                "id": q_id,
-                "type": q_type,
-                "needs_review": True,
-                "rubric": q.get("rubric", ""),
-            })
-
-    # Normalize score to percentage
-    score_pct = (score / max(max_score, 1)) * 100
-
-    attempt.answers = data.answers
-    attempt.score = score_pct
-    attempt.max_score = max_score
-    attempt.completed_at = datetime.now(timezone.utc)
+    
+    for idx, question in enumerate(quiz_questions):
+        user_answer = answers.get(str(idx))
+        correct_answer = question.get("correct_answer", 0)
+        is_correct = int(user_answer) == int(correct_answer) if user_answer is not None else False
+        
+        if is_correct:
+            score += 1
+        
+        results.append({
+            "question_number": idx,
+            "correct": is_correct,
+            "user_answer": user_answer,
+            "correct_answer": correct_answer,
+            "explanation": question.get("explanation", "")
+        })
+    
+    score_pct = (score / len(quiz_questions)) * 100 if quiz_questions else 0
+    
+    # Save quiz attempt
+    attempt = QuizAttempt(
+        user_id=user.id,
+        study_plan_id=plan_id,
+        questions=quiz_questions,
+        answers=answers,
+        score=score_pct,
+        max_score=len(quiz_questions),
+        completed_at=datetime.now(timezone.utc)
+    )
+    db.add(attempt)
     db.commit()
-
+    
     return {
         "score": score_pct,
-        "max_score": max_score,
-        "results": results,
+        "total_questions": len(quiz_questions),
+        "correct_answers": score,
+        "results": results
     }
 
 
@@ -252,7 +331,7 @@ def list_quizzes(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List recent quizzes."""
+    """List recent quiz attempts."""
     quizzes = db.query(QuizAttempt).filter(
         QuizAttempt.user_id == user.id
     ).order_by(QuizAttempt.created_at.desc()).limit(limit).all()

@@ -1,46 +1,19 @@
 """
-LifeOS – RAG Service
-PDF parsing, chunking, FAISS vector store, and semantic retrieval.
-Uses SentenceTransformers (all-MiniLM-L6-v2) for cost-effective local embeddings.
+LifeOS – RAG Service (Simplified)
+PDF text extraction and storage - no embeddings/FAISS for faster performance.
 """
 
 import os
-import json
-import numpy as np
-from typing import List, Optional, Tuple
-from pathlib import Path
+from typing import Optional
 
 from sqlalchemy.orm import Session
 from PyPDF2 import PdfReader
 
-from app.config.settings import settings
-from app.models.models import Document, DocumentChunk
-
-# Lazy-loaded globals for expensive models
-_embedding_model = None
-_faiss = None
-
-
-def _get_embedding_model():
-    """Lazy-load SentenceTransformer model."""
-    global _embedding_model
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
-    return _embedding_model
-
-
-def _get_faiss():
-    """Lazy-load FAISS."""
-    global _faiss
-    if _faiss is None:
-        import faiss as _f
-        _faiss = _f
-    return _faiss
+from app.models.models import Document
 
 
 # ═══════════════════════════════════════════════════════════
-#  PDF PARSING & CHUNKING
+#  PDF TEXT EXTRACTION
 # ═══════════════════════════════════════════════════════════
 
 def extract_text_from_pdf(file_path: str) -> str:
@@ -54,10 +27,38 @@ def extract_text_from_pdf(file_path: str) -> str:
     return text.strip()
 
 
-def chunk_text(
-    text: str,
-    chunk_size: int = None,
-    chunk_overlap: int = None,
+def process_document(
+    db: Session,
+    user_id: str,
+    file_path: str,
+    filename: str,
+) -> Document:
+    """
+    Fast PDF processing: extract text and store directly in DB.
+    No chunking, no embeddings, no FAISS - instant upload.
+    """
+    # Extract text
+    text = extract_text_from_pdf(file_path)
+    if not text:
+        raise ValueError("Could not extract text from PDF")
+
+    # Store document with full text
+    doc = Document(
+        user_id=user_id,
+        filename=filename,
+        file_type="pdf",
+        content=text,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
+def get_document_content(db: Session, document_id: str) -> Optional[str]:
+    """Retrieve full document content by ID."""
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    return doc.content if doc else None
 ) -> List[str]:
     """Split text into overlapping chunks for embedding."""
     chunk_size = chunk_size or settings.CHUNK_SIZE

@@ -164,7 +164,6 @@ class DocumentResponse(BaseModel):
     id: str
     filename: str
     file_type: str
-    chunk_count: int
     created_at: datetime
 
     class Config:
