@@ -6,6 +6,7 @@ Document upload, study plan generation, quiz engine, RAG queries.
 import os
 import shutil
 import tempfile
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -51,12 +52,15 @@ async def upload_document(
         tmp_path = tmp.name
 
     try:
-        doc = process_document(db, user.id, tmp_path, file.filename)
+        # Run blocking ML operations in thread pool to avoid freezing event loop
+        doc = await asyncio.to_thread(process_document, db, user.id, tmp_path, file.filename)
         return DocumentResponse.model_validate(doc)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        os.unlink(tmp_path)
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @router.get("/documents", response_model=list[DocumentResponse])
@@ -77,13 +81,14 @@ def list_documents(
 # ═══════════════════════════════════════════════════════════
 
 @router.post("/query", response_model=RAGQueryResponse)
-def query_documents(
+async def query_documents(
     data: RAGQueryRequest,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Query uploaded documents using RAG."""
-    result = rag_query(db, user.id, data.query, data.document_id, data.top_k)
+    # Run blocking RAG query (embedding + FAISS search) in thread pool
+    result = await asyncio.to_thread(rag_query, db, user.id, data.query, data.document_id, data.top_k)
     return RAGQueryResponse(**result)
 
 
@@ -92,14 +97,15 @@ def query_documents(
 # ═══════════════════════════════════════════════════════════
 
 @router.post("/study-plan", response_model=StudyPlanResponse, status_code=201)
-def create_study_plan(
+async def create_study_plan(
     data: StudyPlanRequest,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Generate a RAG-grounded study plan."""
-    plan_data = generate_study_plan(
-        db, user.id, data.goal, data.duration_days, data.document_id
+    # Run blocking LLM API call in thread pool
+    plan_data = await asyncio.to_thread(
+        generate_study_plan, db, user.id, data.goal, data.duration_days, data.document_id
     )
 
     plan = StudyPlan(
@@ -150,7 +156,7 @@ def get_study_plan(
 # ═══════════════════════════════════════════════════════════
 
 @router.post("/quiz/generate", response_model=QuizResponse, status_code=201)
-def create_quiz(
+async def create_quiz(
     data: QuizGenerateRequest,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -161,9 +167,9 @@ def create_quiz(
     """
     topic = data.topic or "General review"
 
-    # Generate quiz questions
-    quiz_data = generate_quiz(
-        db, user.id, topic, data.difficulty.value, data.document_id
+    # Generate quiz questions (blocking LLM API call, run in thread pool)
+    quiz_data = await asyncio.to_thread(
+        generate_quiz, db, user.id, topic, data.difficulty.value, data.document_id
     )
 
     # Create quiz attempt record

@@ -46,11 +46,16 @@ class ConnectionManager:
         if user_id not in self._connections:
             return
 
+        # Create a snapshot to avoid "set changed size during iteration"
+        async with self._lock:
+            connections_snapshot = list(self._connections.get(user_id, []))
+
         dead_connections = set()
-        for ws in self._connections[user_id]:
+        for ws in connections_snapshot:
             try:
                 await ws.send_json(message)
-            except Exception:
+            except Exception as e:
+                print(f"[WS Error] Failed to send to connection: {e}")
                 dead_connections.add(ws)
 
         # Clean up dead connections
@@ -58,6 +63,8 @@ class ConnectionManager:
             async with self._lock:
                 if user_id in self._connections:
                     self._connections[user_id] -= dead_connections
+                    if not self._connections[user_id]:
+                        del self._connections[user_id]
 
     async def broadcast(self, message: dict):
         """Broadcast message to all connected users."""
