@@ -1,0 +1,222 @@
+"""
+LifeOS – SQLAlchemy Database Models
+Implements CASCADE deletes, indexed timestamps, and UTC-aware fields.
+Compatible with both SQLite (dev) and MySQL (production).
+"""
+
+import uuid
+from datetime import datetime, timezone
+from sqlalchemy import (
+    Column, String, Integer, Float, Boolean, Text, DateTime,
+    ForeignKey, Index, JSON
+)
+from sqlalchemy.orm import relationship
+from app.config.database import Base
+
+
+def generate_uuid() -> str:
+    return str(uuid.uuid4())
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# ═══════════════════════════════════════════════════════════
+#  USER & AUTH
+# ═══════════════════════════════════════════════════════════
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default="student")  # 'student' | 'parent'
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    tracking_logs = relationship("TrackingLog", back_populates="user", cascade="all, delete-orphan")
+    daily_summaries = relationship("DailySummary", back_populates="user", cascade="all, delete-orphan")
+    study_plans = relationship("StudyPlan", back_populates="user", cascade="all, delete-orphan")
+    quiz_attempts = relationship("QuizAttempt", back_populates="user", cascade="all, delete-orphan")
+    documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
+    children = relationship("ParentChild", back_populates="parent",
+                            foreign_keys="ParentChild.parent_id", cascade="all, delete-orphan")
+    parents = relationship("ParentChild", back_populates="child",
+                           foreign_keys="ParentChild.child_id", cascade="all, delete-orphan")
+
+
+# ═══════════════════════════════════════════════════════════
+#  PARENTAL CONTROL
+# ═══════════════════════════════════════════════════════════
+
+class ParentChild(Base):
+    __tablename__ = "parent_child"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    parent_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    child_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    invite_code = Column(String(20), unique=True)
+    is_accepted = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=utcnow)
+
+    parent = relationship("User", back_populates="children", foreign_keys=[parent_id])
+    child = relationship("User", back_populates="parents", foreign_keys=[child_id])
+
+
+class BlockedSite(Base):
+    __tablename__ = "blocked_sites"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    parent_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    child_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    domain = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("idx_blocked_child_domain", "child_id", "domain"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  ACTIVITY TRACKING
+# ═══════════════════════════════════════════════════════════
+
+class TrackingLog(Base):
+    __tablename__ = "tracking_logs"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    domain = Column(String(255), nullable=False)
+    category = Column(String(20), default="neutral")  # 'productive' | 'neutral' | 'distracting'
+    duration_seconds = Column(Integer, nullable=False, default=0)
+    tab_switches = Column(Integer, default=0)
+    scroll_depth = Column(Float, default=0.0)
+    is_active = Column(Boolean, default=True)  # Was user active during this period?
+    page_title = Column(String(500), nullable=True)  # Video/page title (YouTube only)
+    timestamp = Column(DateTime, default=utcnow, index=True)
+
+    user = relationship("User", back_populates="tracking_logs")
+
+    __table_args__ = (
+        Index("idx_tracking_user_timestamp", "user_id", "timestamp"),
+        Index("idx_tracking_user_domain", "user_id", "domain"),
+    )
+
+
+class DailySummary(Base):
+    """Pre-aggregated daily summary for fast analytics queries."""
+    __tablename__ = "daily_summaries"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    date = Column(DateTime, nullable=False)
+    total_active_seconds = Column(Integer, default=0)
+    productive_seconds = Column(Integer, default=0)
+    neutral_seconds = Column(Integer, default=0)
+    distracting_seconds = Column(Integer, default=0)
+    total_tab_switches = Column(Integer, default=0)
+    focus_factor = Column(Float, default=1.0)
+    productivity_score = Column(Float, default=0.0)
+    quiz_average = Column(Float, default=0.0)
+    top_domains = Column(JSON, default=list)
+
+    user = relationship("User", back_populates="daily_summaries")
+
+    __table_args__ = (
+        Index("idx_summary_user_date", "user_id", "date", unique=True),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  DOMAIN CLASSIFICATIONS
+# ═══════════════════════════════════════════════════════════
+
+class DomainCategory(Base):
+    """Configurable domain → category mapping."""
+    __tablename__ = "domain_categories"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    domain_pattern = Column(String(255), nullable=False, unique=True)
+    category = Column(String(20), nullable=False)  # 'productive' | 'neutral' | 'distracting'
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    is_global = Column(Boolean, default=False)
+
+
+# ═══════════════════════════════════════════════════════════
+#  RAG & STUDY PLANNING
+# ═══════════════════════════════════════════════════════════
+
+class Document(Base):
+    """Uploaded syllabus / curriculum / exam outline."""
+    __tablename__ = "documents"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)
+    file_type = Column(String(50), default="pdf")
+    chunk_count = Column(Integer, default=0)
+    faiss_index_path = Column(String(500))
+    created_at = Column(DateTime, default=utcnow)
+
+    user = relationship("User", back_populates="documents")
+    chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
+
+
+class DocumentChunk(Base):
+    """Individual text chunks extracted from uploaded documents."""
+    __tablename__ = "document_chunks"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    document_id = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    chunk_metadata = Column(JSON, default=dict)
+
+    document = relationship("Document", back_populates="chunks")
+
+
+class StudyPlan(Base):
+    __tablename__ = "study_plans"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    goal = Column(Text)
+    plan_data = Column(JSON, nullable=False)  # Structured plan from AI
+    duration_days = Column(Integer)
+    document_id = Column(String(36), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    user = relationship("User", back_populates="study_plans")
+
+
+# ═══════════════════════════════════════════════════════════
+#  QUIZ ENGINE
+# ═══════════════════════════════════════════════════════════
+
+class QuizAttempt(Base):
+    __tablename__ = "quiz_attempts"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    study_plan_id = Column(String(36), ForeignKey("study_plans.id", ondelete="SET NULL"), nullable=True)
+    questions = Column(JSON, nullable=False)
+    answers = Column(JSON, default=dict)
+    score = Column(Float, default=0.0)
+    max_score = Column(Float, default=0.0)
+    difficulty = Column(String(20), default="medium")  # 'easy' | 'medium' | 'hard'
+    focus_minutes_before = Column(Float, default=0.0)  # Must meet minimum
+    completed_at = Column(DateTime)
+    created_at = Column(DateTime, default=utcnow)
+
+    user = relationship("User", back_populates="quiz_attempts")
+
+    __table_args__ = (
+        Index("idx_quiz_user_created", "user_id", "created_at"),
+    )
