@@ -48,6 +48,22 @@ def _call_llm(messages: List[dict], temperature: float = 0.7, max_tokens: int = 
         return f"[AI Error] {str(e)}"
 
 
+def retrieve_context_for_query(
+    db: Session, 
+    user_id: str, 
+    query: str, 
+    document_id: Optional[str] = None,
+    top_k: int = 5
+) -> str:
+    """Retrieve relevant context for a query (simplified - returns full document)."""
+    if document_id:
+        content = get_document_content(db, document_id)
+        if content:
+            # Return first 2000 chars as context
+            return content[:2000]
+    return ""
+
+
 # ═══════════════════════════════════════════════════════════
 #  UNIFIED STUDY PLAN + QUIZ GENERATION
 # ═══════════════════════════════════════════════════════════
@@ -108,9 +124,15 @@ Respond with this EXACT JSON structure (no markdown, no code blocks):
             "chapter_number": 1,
             "title": "Chapter title",
             "description": "What this chapter covers",
-            "youtube_url": "https://www.youtube.com/watch?v=ACTUAL_VIDEO_ID",
-            "duration_estimate": "15 min",
-            "key_topics": ["Topic 1", "Topic 2"]
+            "youtube_search_query": "chapter+title+keywords",
+            "duration_estimate": "15-20 min",
+            "key_topics": ["Topic 1", "Topic 2"],
+            "keyword_importance": {{
+                "topic_word_1": 100,
+                "topic_word_2": 90,
+                "generic_word": 30,
+                "channel_name": 10
+            }}
         }}
     ],
     "quiz": [
@@ -125,12 +147,21 @@ Respond with this EXACT JSON structure (no markdown, no code blocks):
 
 REQUIREMENTS:
 1. Generate 3-8 chapters based on content complexity
-2. YouTube URLs MUST be real educational videos (use popular channels: Khan Academy, 3Blue1Brown, CrashCourse, freeCodeCamp, etc.)
+2. For youtube_search_query: Create search-friendly query with + separators (e.g., "dynamic+programming+introduction")
 3. Generate 5-10 quiz questions covering all chapters
 4. Quiz questions should test understanding, not just recall
 5. Each question has 4 options, correct_answer is index (0-3)
+6. Make search queries specific enough to find quality educational content
 
-Be specific with YouTube video recommendations - use actual video IDs from educational channels."""
+IMPORTANT KEYWORD IMPORTANCE:
+- For each chapter, analyze the title words and assign importance scores (0-100)
+- HIGH importance (80-100): Core topic keywords (e.g., "fibonacci", "knapsack", "recursion")
+- MEDIUM importance (40-70): Context words (e.g., "introduction", "algorithm", "problem")
+- LOW importance (10-30): Generic words (e.g., "tutorial", "lecture", "explained")
+- VERY LOW importance (0-10): Channel/creator names (e.g., "striver", "neetcode")
+- This helps match user's video to correct chapter even if from different creator
+
+IMPORTANT: Use youtube_search_query (not youtube_url) - system will auto-detect videos user watches."""
 
     response = _call_llm([
         {"role": "system", "content": system_prompt},

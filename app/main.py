@@ -24,6 +24,8 @@ async def lifespan(app: FastAPI):
     from sqlalchemy import text, inspect
     with engine.connect() as conn:
         inspector = inspect(engine)
+        
+        # Migration 1: page_title for tracking_logs
         columns = [c['name'] for c in inspector.get_columns('tracking_logs')]
         if 'page_title' not in columns:
             try:
@@ -32,6 +34,16 @@ async def lifespan(app: FastAPI):
                 print("[MIGRATE] Added page_title column to tracking_logs")
             except Exception as e:
                 print(f"[MIGRATE] page_title column migration skipped: {e}")
+        
+        # Migration 2: keyword_importance for chapter_progress
+        chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
+        if 'keyword_importance' not in chapters_columns:
+            try:
+                conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN keyword_importance JSON NULL"))
+                conn.commit()
+                print("[MIGRATE] Added keyword_importance column to chapter_progress")
+            except Exception as e:
+                print(f"[MIGRATE] keyword_importance column migration skipped: {e}")
 
     print(f"[START] {settings.APP_NAME} v{settings.APP_VERSION} starting...")
     yield
@@ -46,12 +58,14 @@ app = FastAPI(
 )
 
 # ── CORS ─────────────────────────────────────────────────
+# Allow all origins for extension content scripts (they run in web page context)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=r"https?://(.*\.)?youtube\.com|chrome-extension://.*|https?://localhost:.*|https?://127\.0\.0\.1:.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # ── Middleware ──
@@ -122,9 +136,11 @@ async def websocket_endpoint(
                     db.close()
             elif msg_type == "live_activity":
                 # Extension reporting live browsing - relay to all user connections
+                live_data = data.get("data", {})
+                print(f"[WS Live] {user_id}: {live_data.get('domain')} - \"{live_data.get('page_title')}\" ({live_data.get('category')})")
                 await ws_manager.send_to_user(user_id, {
                     "type": "live_tracking",
-                    "data": data.get("data", {}),
+                    "data": live_data,
                 })
 
     except WebSocketDisconnect:

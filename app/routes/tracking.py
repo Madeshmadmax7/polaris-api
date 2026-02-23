@@ -33,6 +33,11 @@ def log_activity(
 ):
     """Log a single activity entry from extension."""
     log = ingest_tracking_log(db, user.id, data)
+    
+    # Check if this is a YouTube video and update chapter progress
+    if log.domain in ('youtube.com', 'youtu.be') and log.page_title:
+        background_tasks.add_task(_update_video_progress, db, user.id, log.page_title, log.duration_seconds)
+    
     # Broadcast live tracking update to frontend via WebSocket
     background_tasks.add_task(
         _broadcast_tracking, user.id, log.domain, log.category,
@@ -54,6 +59,48 @@ async def _broadcast_tracking(user_id, domain, category, duration, title, ts):
             "timestamp": ts,
         }
     })
+
+
+def _update_video_progress(db: Session, user_id: str, video_title: str, duration_seconds: int):
+    """Update chapter progress if watching a course video."""
+    try:
+        from app.models.models import ChapterProgress
+        
+        # Find matching chapter by video title
+        chapters = db.query(ChapterProgress).filter(
+            ChapterProgress.user_id == user_id,
+            ChapterProgress.is_completed == False
+        ).all()
+        
+        # Simple matching: check if chapter title is in video title or vice versa
+        video_title_lower = video_title.lower()
+        for chapter in chapters:
+            chapter_title_lower = chapter.chapter_title.lower()
+            
+            # Match if chapter title keywords are in video title
+            chapter_keywords = set(chapter_title_lower.split())
+            video_keywords = set(video_title_lower.split())
+            
+            # If at least 2 keywords match, consider it the same video
+            common_keywords = chapter_keywords & video_keywords
+            if len(common_keywords) >= 2:
+                # Update watched seconds (cumulative)
+                chapter.watched_seconds += duration_seconds
+                
+                # Auto-complete if watched >= 90%
+                if chapter.video_duration_seconds > 0:
+                    watch_percentage = (chapter.watched_seconds / chapter.video_duration_seconds) * 100
+                    if watch_percentage >= 90 and not chapter.is_completed:
+                        chapter.is_completed = True
+                        from datetime import datetime, timezone
+                        chapter.completed_at = datetime.now(timezone.utc)
+                
+                db.commit()
+                break
+    except Exception as e:
+        print(f"[Video Progress Update Error]: {str(e)}")
+        # Don't fail the tracking log if video progress update fails
+        pass
 
 
 @router.post("/batch", status_code=200)

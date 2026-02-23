@@ -198,6 +198,7 @@ class StudyPlanResponse(BaseModel):
     goal: str
     plan_data: Any
     duration_days: int
+    quiz_unlocked: bool
     created_at: datetime
 
     class Config:

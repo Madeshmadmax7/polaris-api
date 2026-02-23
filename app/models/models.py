@@ -176,6 +176,10 @@ class ChapterProgress(Base):
     chapter_index = Column(Integer, nullable=False)
     chapter_title = Column(String(255), nullable=False)
     youtube_url = Column(String(500), nullable=True)
+    video_duration_seconds = Column(Integer, default=0)  # Total video duration from YouTube
+    watched_seconds = Column(Integer, default=0)  # User's watch progress
+    creator_name = Column(String(100), nullable=True)  # e.g., "striver", "kunal kushwaha"
+    keyword_importance = Column(JSON, nullable=True)  # AI-generated word importance scores {"fibonacci": 100, "dp": 80, "striver": 10}
     is_completed = Column(Boolean, default=False)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
