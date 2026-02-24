@@ -176,6 +176,7 @@ class ChapterProgress(Base):
     chapter_index = Column(Integer, nullable=False)
     chapter_title = Column(String(255), nullable=False)
     youtube_url = Column(String(500), nullable=True)
+    youtube_title = Column(String(500), nullable=True)  # Actual YouTube video title
     video_duration_seconds = Column(Integer, default=0)  # Total video duration from YouTube
     watched_seconds = Column(Integer, default=0)  # User's watch progress
     creator_name = Column(String(100), nullable=True)  # e.g., "striver", "kunal kushwaha"

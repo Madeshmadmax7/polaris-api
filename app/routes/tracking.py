@@ -34,9 +34,9 @@ def log_activity(
     """Log a single activity entry from extension."""
     log = ingest_tracking_log(db, user.id, data)
     
-    # Check if this is a YouTube video and update chapter progress
-    if log.domain in ('youtube.com', 'youtu.be') and log.page_title:
-        background_tasks.add_task(_update_video_progress, db, user.id, log.page_title, log.duration_seconds)
+    # NOTE: Video chapter progress is tracked in real-time by youtubeTracker.js
+    # which calls /ai/study-plan/{id}/chapter/{n}/update-progress directly
+    # Do NOT duplicate progress tracking here to avoid conflicts
     
     # Broadcast live tracking update to frontend via WebSocket
     background_tasks.add_task(
@@ -59,48 +59,6 @@ async def _broadcast_tracking(user_id, domain, category, duration, title, ts):
             "timestamp": ts,
         }
     })
-
-
-def _update_video_progress(db: Session, user_id: str, video_title: str, duration_seconds: int):
-    """Update chapter progress if watching a course video."""
-    try:
-        from app.models.models import ChapterProgress
-        
-        # Find matching chapter by video title
-        chapters = db.query(ChapterProgress).filter(
-            ChapterProgress.user_id == user_id,
-            ChapterProgress.is_completed == False
-        ).all()
-        
-        # Simple matching: check if chapter title is in video title or vice versa
-        video_title_lower = video_title.lower()
-        for chapter in chapters:
-            chapter_title_lower = chapter.chapter_title.lower()
-            
-            # Match if chapter title keywords are in video title
-            chapter_keywords = set(chapter_title_lower.split())
-            video_keywords = set(video_title_lower.split())
-            
-            # If at least 2 keywords match, consider it the same video
-            common_keywords = chapter_keywords & video_keywords
-            if len(common_keywords) >= 2:
-                # Update watched seconds (cumulative)
-                chapter.watched_seconds += duration_seconds
-                
-                # Auto-complete if watched >= 90%
-                if chapter.video_duration_seconds > 0:
-                    watch_percentage = (chapter.watched_seconds / chapter.video_duration_seconds) * 100
-                    if watch_percentage >= 90 and not chapter.is_completed:
-                        chapter.is_completed = True
-                        from datetime import datetime, timezone
-                        chapter.completed_at = datetime.now(timezone.utc)
-                
-                db.commit()
-                break
-    except Exception as e:
-        print(f"[Video Progress Update Error]: {str(e)}")
-        # Don't fail the tracking log if video progress update fails
-        pass
 
 
 @router.post("/batch", status_code=200)
@@ -181,6 +139,37 @@ def set_domain_category(
     db.commit()
     db.refresh(cat)
     return DomainCategoryResponse.model_validate(cat)
+
+
+@router.delete("/reset-today")
+def reset_today_tracking(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Delete ALL tracking logs and daily summary for today.
+    Useful for testing / fresh start."""
+    from app.models.models import TrackingLog, DailySummary
+    
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    deleted_logs = db.query(TrackingLog).filter(
+        TrackingLog.user_id == user.id,
+        TrackingLog.timestamp >= today_start,
+    ).delete(synchronize_session=False)
+    
+    deleted_summaries = db.query(DailySummary).filter(
+        DailySummary.user_id == user.id,
+        DailySummary.date >= today_start,
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    
+    return {
+        "success": True,
+        "deleted_logs": deleted_logs,
+        "deleted_summaries": deleted_summaries,
+        "message": f"Cleared {deleted_logs} tracking logs and {deleted_summaries} daily summaries for today"
+    }
 
 
 @router.get("/debug")

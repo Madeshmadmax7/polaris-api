@@ -228,6 +228,49 @@ def mark_chapter_complete(
     }
 
 
+@router.post("/study-plan/{plan_id}/chapter/{chapter_number}/reset")
+def reset_chapter_progress(
+    plan_id: str,
+    chapter_number: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Reset a chapter's progress completely.
+    Re-opens it for fresh tracking: clears video info, watched time, completion status.
+    """
+    progress = db.query(ChapterProgress).filter(
+        ChapterProgress.study_plan_id == plan_id,
+        ChapterProgress.user_id == user.id,
+        ChapterProgress.chapter_index == chapter_number,
+    ).first()
+    
+    if not progress:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+    
+    old_title = progress.youtube_title
+    progress.youtube_url = None
+    progress.youtube_title = None
+    progress.video_duration_seconds = 0
+    progress.watched_seconds = 0
+    progress.creator_name = None
+    progress.is_completed = False
+    progress.completed_at = None
+    
+    # Re-lock quiz if this chapter was completed
+    plan = db.query(StudyPlan).filter(StudyPlan.id == plan_id).first()
+    if plan and plan.quiz_unlocked:
+        plan.quiz_unlocked = False
+    
+    db.commit()
+    
+    print(f"[Chapter Reset] Chapter {chapter_number}: '{old_title}' → RESET")
+    return {
+        "success": True,
+        "message": f"Chapter {chapter_number} has been reset",
+        "chapter_index": chapter_number,
+    }
+
+
 @router.get("/study-plan/{plan_id}/progress")
 def get_chapter_progress(
     plan_id: str,
@@ -260,10 +303,11 @@ def get_chapter_progress(
             {
                 "chapter_index": p.chapter_index,
                 "chapter_title": p.chapter_title,
+                "youtube_title": p.youtube_title,
                 "youtube_url": p.youtube_url,
                 "video_duration_seconds": p.video_duration_seconds,
                 "watched_seconds": p.watched_seconds,
-                "progress_percentage": (p.watched_seconds / p.video_duration_seconds * 100) if p.video_duration_seconds > 0 else 0,
+                "progress_percentage": min((p.watched_seconds / p.video_duration_seconds * 100), 100) if p.video_duration_seconds > 0 else 0,
                 "creator_name": p.creator_name,
                 "keyword_importance": p.keyword_importance or {},  # AI-generated importance scores
                 "is_completed": p.is_completed,
@@ -287,11 +331,15 @@ def update_chapter_progress(
     chapter_number: int,
     watched_seconds: int = Body(..., embed=True),
     video_ended: bool = Body(False, embed=True),
+    video_duration_seconds: Optional[int] = Body(None, embed=True),
+    video_title: Optional[str] = Body(None, embed=True),
+    creator_name: Optional[str] = Body(None, embed=True),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Update watch progress for a chapter (called by tracking system every 10 seconds).
     Real-time progress updates with exact video.currentTime tracking.
+    Also backfills youtube_title and creator_name if missing.
     """
     progress = db.query(ChapterProgress).filter(
         ChapterProgress.study_plan_id == plan_id,
@@ -302,9 +350,29 @@ def update_chapter_progress(
     if not progress:
         raise HTTPException(status_code=404, detail="Chapter not found")
     
-    # ALLOW RE-WATCHING: Update watched seconds even for completed chapters
-    # Users can rewatch completed videos and progress should update
-    progress.watched_seconds = watched_seconds
+    # Backfill youtube_title if it's missing (migration support)
+    if video_title and not progress.youtube_title:
+        progress.youtube_title = video_title
+        print(f"[Title Backfill] Chapter {chapter_number}: '{video_title}' (via progress update)")
+    
+    # Always update creator_name when provided (fixes stale channel name after video switch)
+    if creator_name and progress.creator_name != creator_name:
+        print(f"[Creator Update] Chapter {chapter_number}: '{progress.creator_name}' → '{creator_name}'")
+        progress.creator_name = creator_name
+    
+    # Update video duration if a better (larger) value is provided by the extension
+    # This corrects wrong durations from ads or early metadata detection
+    if video_duration_seconds and video_duration_seconds > progress.video_duration_seconds:
+        old_dur = progress.video_duration_seconds
+        progress.video_duration_seconds = video_duration_seconds
+        print(f"[Duration Fix] Chapter {chapter_number}: {old_dur}s → {video_duration_seconds}s")
+    
+    # ALLOW RE-WATCHING: Track time even for completed chapters (analytics)
+    # But NEVER reduce watched_seconds on completed chapters (preserves progress bar)
+    if progress.is_completed:
+        progress.watched_seconds = max(progress.watched_seconds, watched_seconds)
+    else:
+        progress.watched_seconds = watched_seconds
     
     # Auto-complete if video ended OR watched >= 95% of video
     if progress.video_duration_seconds > 0:
@@ -337,7 +405,7 @@ def update_chapter_progress(
         "success": True,
         "watched_seconds": progress.watched_seconds,
         "video_duration_seconds": progress.video_duration_seconds,
-        "progress_percentage": (progress.watched_seconds / progress.video_duration_seconds * 100) if progress.video_duration_seconds > 0 else 0,
+        "progress_percentage": min((progress.watched_seconds / progress.video_duration_seconds * 100), 100) if progress.video_duration_seconds > 0 else 0,
         "is_completed": progress.is_completed
     }
 
@@ -369,13 +437,33 @@ def set_chapter_video(
         raise HTTPException(status_code=404, detail="Chapter not found")
     
     # LOCK: Do not allow video changes on completed chapters
+    # BUT allow filling in missing metadata (title, creator, duration fix)
     if progress.is_completed:
+        updated = False
+        if video_title and not progress.youtube_title:
+            progress.youtube_title = video_title
+            updated = True
+            print(f"[Title Backfill] Chapter {chapter_number}: '{video_title}'")
+        if creator_name and not progress.creator_name:
+            progress.creator_name = creator_name
+            updated = True
+        # Fix bad duration (ad-captured durations are typically < 120s for real videos)
+        if video_duration_seconds and video_duration_seconds > progress.video_duration_seconds:
+            old_dur = progress.video_duration_seconds
+            progress.video_duration_seconds = video_duration_seconds
+            # Also update watched_seconds to match if it was capped by old bad duration
+            progress.watched_seconds = max(progress.watched_seconds, video_duration_seconds)
+            updated = True
+            print(f"[Duration Fix] Completed chapter {chapter_number}: {old_dur}s → {video_duration_seconds}s")
+        if updated:
+            db.commit()
         return {
             "success": False,
             "message": "Chapter already completed - cannot change video",
             "youtube_url": progress.youtube_url,
             "video_duration_seconds": progress.video_duration_seconds,
             "creator_name": progress.creator_name,
+            "youtube_title": progress.youtube_title,
             "progress_reset": False,
             "watched_seconds": progress.watched_seconds
         }
@@ -391,6 +479,8 @@ def set_chapter_video(
     progress.video_duration_seconds = video_duration_seconds
     if creator_name:
         progress.creator_name = creator_name
+    if video_title:
+        progress.youtube_title = video_title
     
     # RESET progress if video changed (user switched to different video on same topic)
     if video_changed:
@@ -409,6 +499,58 @@ def set_chapter_video(
         "progress_reset": video_changed,
         "watched_seconds": progress.watched_seconds
     }
+
+
+# ═══════════════════════════════════════════════════════════
+#  PENDING CHAPTER ASSIGNMENT (for "Search on YouTube" button)
+# ═══════════════════════════════════════════════════════════
+
+# In-memory store: user_id → pending chapter info
+# Survives within server lifetime; cleared on restart (acceptable for this UX)
+_pending_chapters = {}
+
+
+@router.post("/set-pending-chapter")
+def set_pending_chapter(
+    plan_id: str = Body(..., embed=True),
+    chapter_index: int = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Mark a chapter as pending for automatic video assignment.
+    Called when user clicks 'Search on YouTube' from the learning page.
+    The extension will consume this on the next YouTube video detection."""
+    progress = db.query(ChapterProgress).filter(
+        ChapterProgress.study_plan_id == plan_id,
+        ChapterProgress.user_id == user.id,
+        ChapterProgress.chapter_index == chapter_index,
+    ).first()
+
+    if not progress:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+
+    _pending_chapters[user.id] = {
+        "plan_id": plan_id,
+        "chapter_index": chapter_index,
+        "chapter_title": progress.chapter_title,
+        "is_completed": progress.is_completed,
+    }
+    print(f"[Pending] Set pending chapter: plan={plan_id}, ch={chapter_index}, title={progress.chapter_title}")
+
+    return {"success": True, "pending": _pending_chapters[user.id]}
+
+
+@router.get("/pending-chapter")
+def get_pending_chapter(
+    user: User = Depends(get_current_user),
+):
+    """Get and consume the pending chapter assignment.
+    Returns pending info and clears it (one-time use)."""
+    pending = _pending_chapters.pop(user.id, None)
+    if not pending:
+        return {"pending": None}
+    print(f"[Pending] Consumed pending chapter: {pending['chapter_title']}")
+    return {"pending": pending}
 
 
 # ═══════════════════════════════════════════════════════════
