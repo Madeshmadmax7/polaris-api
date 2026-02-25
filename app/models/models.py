@@ -181,6 +181,7 @@ class ChapterProgress(Base):
     watched_seconds = Column(Integer, default=0)  # User's watch progress
     creator_name = Column(String(100), nullable=True)  # e.g., "striver", "kunal kushwaha"
     keyword_importance = Column(JSON, nullable=True)  # AI-generated word importance scores {"fibonacci": 100, "dp": 80, "striver": 10}
+    chapter_embedding = Column(JSON, nullable=True)   # 384-dim float list from all-MiniLM-L6-v2; NULL for legacy rows
     is_completed = Column(Boolean, default=False)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)

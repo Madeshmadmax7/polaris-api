@@ -16,15 +16,14 @@ from app.utils.auth import decode_token
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle — create tables on startup."""
+    """Application lifecycle — create tables, run migrations, preload ML model."""
     Base.metadata.create_all(bind=engine)
 
-    # Safe migration: add page_title column if it doesn't exist
-    # (create_all won't add new columns to existing tables)
+    # Safe migration: add new columns without breaking existing tables
     from sqlalchemy import text, inspect
     with engine.connect() as conn:
         inspector = inspect(engine)
-        
+
         # Migration 1: page_title for tracking_logs
         columns = [c['name'] for c in inspector.get_columns('tracking_logs')]
         if 'page_title' not in columns:
@@ -34,7 +33,7 @@ async def lifespan(app: FastAPI):
                 print("[MIGRATE] Added page_title column to tracking_logs")
             except Exception as e:
                 print(f"[MIGRATE] page_title column migration skipped: {e}")
-        
+
         # Migration 2: keyword_importance for chapter_progress
         chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
         if 'keyword_importance' not in chapters_columns:
@@ -45,9 +44,73 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[MIGRATE] keyword_importance column migration skipped: {e}")
 
+        # Migration 3: chapter_embedding for semantic video matching
+        chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
+        if 'chapter_embedding' not in chapters_columns:
+            try:
+                conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN chapter_embedding JSON NULL"))
+                conn.commit()
+                print("[MIGRATE] Added chapter_embedding column to chapter_progress")
+            except Exception as e:
+                print(f"[MIGRATE] chapter_embedding column migration skipped: {e}")
+
+    # ── Preload embedding model at startup (runs in thread pool to avoid blocking) ──
+    # This ensures the first /match-video request does not pay model-load latency.
+    import asyncio
+    from app.services import matching_service
+    model_ok = await asyncio.to_thread(matching_service.preload_model)
+    if model_ok:
+        print("[START] Embedding model preloaded successfully.")
+    else:
+        print("[START] WARNING: Embedding model failed to load — semantic matching unavailable.")
+
+    # ── Backfill embeddings for existing chapters that don't have one yet ──
+    if model_ok:
+        await asyncio.to_thread(_backfill_chapter_embeddings)
+
     print(f"[START] {settings.APP_NAME} v{settings.APP_VERSION} starting...")
     yield
     print(f"[STOP] {settings.APP_NAME} shutting down...")
+
+
+def _backfill_chapter_embeddings():
+    """
+    Generate and store chapter_embedding for any ChapterProgress rows that are missing it.
+    This runs once at startup in a background thread so new deployments self-heal.
+    """
+    from app.config.database import SessionLocal
+    from app.models.models import ChapterProgress
+    from app.services.matching_service import build_chapter_text, embed_text
+
+    db = SessionLocal()
+    try:
+        missing = db.query(ChapterProgress).filter(
+            ChapterProgress.chapter_embedding.is_(None)
+        ).all()
+
+        if not missing:
+            print("[Backfill] All chapters already have embeddings.")
+            return
+
+        print(f"[Backfill] Generating embeddings for {len(missing)} chapters...")
+        updated = 0
+        for ch in missing:
+            text = build_chapter_text(
+                chapter_title=ch.chapter_title,
+                keyword_importance=ch.keyword_importance,
+            )
+            emb = embed_text(text)
+            if emb:
+                ch.chapter_embedding = emb
+                updated += 1
+
+        db.commit()
+        print(f"[Backfill] Done — {updated}/{len(missing)} chapters embedded.")
+    except Exception as e:
+        print(f"[Backfill] Error during embedding backfill: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 app = FastAPI(

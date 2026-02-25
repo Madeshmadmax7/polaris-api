@@ -1,0 +1,19 @@
+INFO:     Will watch for changes in these directories: ['c:\\Users\\MADDY\\OneDrive\\Desktop\\CSE-4\\lifeos\\backend']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [19836] using WatchFiles
+INFO:     Started server process [12652]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+[START] Embedding model preloaded successfully.
+[Backfill] All chapters already have embeddings.
+[START] LifeOS v1.0.0 starting...
+DEBUG: Incoming POST to http://127.0.0.1:8000/api/tracking/batch
+INFO:     127.0.0.1:64027 - "POST /api/tracking/batch HTTP/1.1" 200 OK
+INFO:     ('127.0.0.1', 64035) - "WebSocket /ws?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1YWQxOWY0OS02NjRjLTQxMTMtYjYxZS03NmJmNzk0MzE2NTUiLCJyb2xlIjoic3R1ZGVudCIsImV4cCI6MTc3MjA0MDgzMX0.WTML0ukrVqHX-C1yRXVKMtMDK2JCivtmMJILijYypKU" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 64042) - "WebSocket /ws?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1YWQxOWY0OS02NjRjLTQxMTMtYjYxZS03NmJmNzk0MzE2NTUiLCJyb2xlIjoic3R1ZGVudCIsImV4cCI6MTc3MjAyNDkxNX0.tM-69zgGwUoxDbLvIXUrpgoySQ4ZXt93svNZjMk6sGI" [accepted]
+INFO:     connection open
+[WS] Connected: 5ad19f49-664c-4113-b61e-76bf79431655 (1 active)
+[WS] Connected: 5ad19f49-664c-4113-b61e-76bf79431655 (2 active)
+DEBUG: Incoming POST to http://127.0.0.1:8000/api/tracking/log
+INFO:     127.0.0.1:64054 - "POST /api/tracking/log HTTP/1.1" 201 Created

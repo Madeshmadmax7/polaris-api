@@ -75,6 +75,9 @@ class TrackingLogCreate(BaseModel):
     is_active: bool = True
     page_title: Optional[str] = Field(None, max_length=500)
     timestamp: Optional[datetime] = None
+    # Extension-side YouTube video classification (productive/distracting/neutral).
+    # When present, this takes priority over domain-level defaults for youtube.com.
+    yt_classification: Optional[str] = Field(None, max_length=20)
 
 
 class TrackingBatchCreate(BaseModel):

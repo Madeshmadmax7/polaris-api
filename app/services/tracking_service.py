@@ -93,10 +93,17 @@ def ingest_tracking_log(
 
     category = resolve_category(domain, db, user_id)
 
-    # Smart YouTube classification: override category based on video title
+    # Smart YouTube classification — three-tier override:
+    # 1. Trust the extension's real-time classification if provided (most accurate).
+    # 2. Fall back to title keyword matching.
+    # 3. Otherwise keep domain default.
     page_title = getattr(log_data, 'page_title', None)
-    if page_title and domain in ('youtube.com', 'youtu.be') and category == 'distracting':
-        if _is_learning_video(page_title):
+    yt_cls = getattr(log_data, 'yt_classification', None)
+    if domain in ('youtube.com', 'youtu.be'):
+        if yt_cls in ('productive', 'neutral', 'distracting'):
+            # Extension already classified this video — trust it directly.
+            category = yt_cls
+        elif page_title and category == 'distracting' and _is_learning_video(page_title):
             category = 'productive'
 
     log = TrackingLog(
@@ -118,18 +125,39 @@ def ingest_tracking_log(
 
 # ── YouTube Learning Detection ────────────────────────────
 LEARNING_KEYWORDS = [
+    # General education
     'tutorial', 'course', 'lecture', 'learn', 'how to', 'explained',
     'walkthrough', 'study', 'education', 'class', 'lesson', 'training',
     'guide', 'documentation', 'workshop', 'bootcamp', 'masterclass',
-    'programming', 'coding', 'code', 'developer', 'software', 'web dev',
+    'introduction', 'intro', 'beginner', 'basics', 'fundamentals', 'overview',
+    'crash course', 'complete guide', 'full course', 'for beginners', 'step by step',
+    # Web fundamentals (titles like "Semantic HTML & Accessibility")
+    'html', 'css', 'web design', 'web development', 'web dev', 'webpage',
+    'website', 'markup', 'styling', 'responsive', 'flexbox', 'grid layout',
+    'bootstrap', 'tailwind', 'sass', 'scss', 'dom', 'semantic',
+    'accessibility', 'forms', 'tables', 'tags', 'attributes', 'selectors',
+    'w3schools', 'mdn', 'web standards',
+    # CS / Programming
+    'programming', 'coding', 'code', 'developer', 'software',
     'javascript', 'python', 'java', 'react', 'node', 'sql', 'database',
     'algorithm', 'data structure', 'dsa', 'leetcode', 'competitive',
     'frontend', 'backend', 'fullstack', 'full stack', 'api', 'devops',
+    'git', 'linux', 'docker', 'kubernetes', 'cloud', 'aws', 'azure',
+    'typescript', 'c++', 'golang', 'rust', 'flutter', 'swift',
     'machine learning', 'deep learning', 'artificial intelligence',
-    'neural network', 'nlp', 'computer vision',
+    'neural network', 'nlp', 'computer vision', 'tensorflow', 'pytorch',
+    'hooks', 'context api', 'state management', 'lifecycle', 'component',
+    'express', 'mongodb', 'postgresql', 'redis', 'graphql',
+    'rest api', 'microservices', 'ci/cd', 'testing', 'debugging',
+    'object oriented', 'functional programming', 'async', 'promises',
+    'data science', 'pandas', 'numpy', 'matplotlib', 'jupyter',
+    'cybersecurity', 'networking', 'operating system', 'compiler',
+    # Science & Math
     'physics', 'chemistry', 'biology', 'math', 'calculus', 'algebra',
     'statistics', 'probability', 'engineering', 'science',
+    # Academic
     'exam', 'preparation', 'gate', 'placement', 'interview prep',
+    'campus', 'semester', 'university', 'college', 'syllabus',
 ]
 
 

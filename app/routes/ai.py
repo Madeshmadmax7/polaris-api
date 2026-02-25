@@ -23,6 +23,7 @@ from app.schemas.schemas import (
 from app.utils.auth import get_current_user
 from app.services.rag_service import process_document
 from app.services.ai_service import generate_study_plan_with_quiz
+from app.services import matching_service as _matching
 
 router = APIRouter(prefix="/ai", tags=["AI & Learning"])
 
@@ -112,6 +113,7 @@ async def create_study_plan(
     
     # Create chapter progress tracking entries
     chapters = plan_data.get("chapters", [])
+    chapter_progress_list = []
     for chapter in chapters:
         chapter_progress = ChapterProgress(
             study_plan_id=plan.id,
@@ -123,7 +125,30 @@ async def create_study_plan(
             is_completed=False,
         )
         db.add(chapter_progress)
-    
+        chapter_progress_list.append((chapter_progress, chapter))
+
+    # ── Batch-generate semantic embeddings for all chapters ──
+    model = _matching.get_model()
+    if model:
+        texts = [
+            _matching.build_chapter_text(
+                chapter_title=cp.chapter_title,
+                keyword_importance=cp.keyword_importance,
+                description=ch.get("description", ""),
+            )
+            for cp, ch in chapter_progress_list
+        ]
+        try:
+            embeddings = await asyncio.to_thread(
+                lambda: model.encode(texts, normalize_embeddings=True).tolist()
+            )
+            for (cp, _), emb in zip(chapter_progress_list, embeddings):
+                cp.chapter_embedding = emb
+        except Exception as e:
+            print(f"[Embedding] Batch embedding failed: {e}")
+    else:
+        print("[Embedding] Model not available — chapters stored without embeddings")
+
     db.commit()
     return StudyPlanResponse.model_validate(plan)
 
@@ -551,6 +576,141 @@ def get_pending_chapter(
         return {"pending": None}
     print(f"[Pending] Consumed pending chapter: {pending['chapter_title']}")
     return {"pending": pending}
+
+
+# ═══════════════════════════════════════════════════════════
+#  SEMANTIC VIDEO → CHAPTER MATCHING
+# ═══════════════════════════════════════════════════════════
+
+@router.post("/match-video")
+async def match_video_to_chapter(
+    video_title: str = Body(..., embed=True),
+    video_url: str = Body(..., embed=True),
+    video_id: Optional[str] = Body(None, embed=True),
+    video_description: Optional[str] = Body(None, embed=True),
+    duration_seconds: int = Body(0, embed=True),
+    channel_name: Optional[str] = Body(None, embed=True),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Semantic video-to-chapter matching using sentence embeddings.
+    Called by the Chrome extension when a YouTube video is detected.
+
+    Flow:
+      1. Gather all user's chapters that have stored embeddings.
+      2. Compute cosine similarity between video embedding and each chapter embedding.
+      3. Return best match if similarity >= 0.60; otherwise return matched=False.
+      4. If matched, persist video details to the chapter via set-video logic.
+
+    Similarity thresholds:
+      >= 0.70 → match       (auto-assign)
+      0.60–0.70 → match     (needs_confirmation flag set, background ignores for now)
+      < 0.60  → no match
+    """
+    # Gather all user's chapters that have embeddings
+    all_chapters = db.query(ChapterProgress).filter(
+        ChapterProgress.user_id == user.id,
+        ChapterProgress.chapter_embedding.isnot(None),
+    ).all()
+
+    if not all_chapters:
+        return {"matched": False, "reason": "no_chapters_with_embeddings"}
+
+    print(f"[MatchVideo] '{video_title[:60]}' → checking against {len(all_chapters)} chapters with embeddings")
+
+    # Build list for matching_service
+    chapter_items = [
+        {
+            "chapter_index": ch.chapter_index,
+            "chapter_title": ch.chapter_title,
+            "chapter_embedding": ch.chapter_embedding,
+            "is_completed": ch.is_completed,
+            "plan_id": ch.study_plan_id,
+            "plan_title": "",
+        }
+        for ch in all_chapters
+    ]
+
+    # Run CPU-bound matching in thread pool
+    match = await asyncio.to_thread(
+        _matching.find_best_chapter,
+        chapter_items,
+        video_title,
+        video_description,
+    )
+
+    if match is None:
+        print(f"[MatchVideo] No match found for '{video_title[:60]}' — all chapters below threshold")
+        return {"matched": False, "reason": "below_threshold"}
+
+    plan_id = match["plan_id"]
+    chapter_index = match["chapter_index"]
+    similarity = match["similarity"]
+    match_type = match["match_type"]
+
+    # Retrieve the matched ChapterProgress row
+    matched_ch = next(
+        (ch for ch in all_chapters
+         if ch.study_plan_id == plan_id and ch.chapter_index == chapter_index),
+        None,
+    )
+    if matched_ch is None:
+        return {"matched": False, "reason": "chapter_not_found"}
+
+    # ── Persist video info to chapter (mirrors set-video logic) ──
+    if not matched_ch.is_completed:
+        video_changed = bool(matched_ch.youtube_url and matched_ch.youtube_url != video_url)
+        matched_ch.youtube_url = video_url
+        if duration_seconds > matched_ch.video_duration_seconds:
+            matched_ch.video_duration_seconds = duration_seconds
+        if channel_name:
+            matched_ch.creator_name = channel_name
+        if video_title:
+            matched_ch.youtube_title = video_title
+        if video_changed:
+            matched_ch.watched_seconds = 0
+            matched_ch.is_completed = False
+            matched_ch.completed_at = None
+            print(f"[SemanticMatch] Video changed on chapter {chapter_index} — progress reset")
+    else:
+        # Fill missing metadata on already-completed chapters (no unlock/reset)
+        updated = False
+        if video_title and not matched_ch.youtube_title:
+            matched_ch.youtube_title = video_title
+            updated = True
+        if channel_name and not matched_ch.creator_name:
+            matched_ch.creator_name = channel_name
+            updated = True
+        if duration_seconds and duration_seconds > matched_ch.video_duration_seconds:
+            matched_ch.video_duration_seconds = duration_seconds
+            updated = True
+        if not updated:
+            pass  # nothing to persist
+
+    db.commit()
+
+    # Fetch plan title for logging
+    plan = db.query(StudyPlan).filter(StudyPlan.id == plan_id).first()
+    plan_title = plan.title if plan else ""
+
+    print(
+        f"[SemanticMatch] '{video_title[:60]}' → "
+        f"'{matched_ch.chapter_title}' "
+        f"sim={similarity:.3f} type={match_type}"
+    )
+
+    return {
+        "matched": True,
+        "plan_id": plan_id,
+        "plan_title": plan_title,
+        "chapter_index": chapter_index,
+        "chapter_title": matched_ch.chapter_title,
+        "similarity": round(similarity, 3),
+        "match_type": match_type,
+        "needs_confirmation": match_type == "needs_confirmation",
+        "is_rewatch": matched_ch.is_completed,
+    }
 
 
 # ═══════════════════════════════════════════════════════════
