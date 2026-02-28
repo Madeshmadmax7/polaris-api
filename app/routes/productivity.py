@@ -44,7 +44,7 @@ def get_today_score(
 
 @router.get("/trend")
 def get_trend(
-    days: int = Query(7, ge=1, le=90),
+    days: int = Query(7, ge=1, le=365),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
