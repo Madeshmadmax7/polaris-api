@@ -54,19 +54,20 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[MIGRATE] chapter_embedding column migration skipped: {e}")
 
-    # ── Preload embedding model at startup (runs in thread pool to avoid blocking) ──
-    # This ensures the first /match-video request does not pay model-load latency.
+    # ── Preload embedding model at startup (runs in background to avoid blocking) ──
+    # This ensures the server starts immediately while the model loads.
     import asyncio
     from app.services import matching_service
-    model_ok = await asyncio.to_thread(matching_service.preload_model)
-    if model_ok:
-        print("[START] Embedding model preloaded successfully.")
-    else:
-        print("[START] WARNING: Embedding model failed to load — semantic matching unavailable.")
 
-    # ── Backfill embeddings for existing chapters that don't have one yet ──
-    if model_ok:
-        await asyncio.to_thread(_backfill_chapter_embeddings)
+    async def _init_model_and_backfill():
+        model_ok = await asyncio.to_thread(matching_service.preload_model)
+        if model_ok:
+            print("[START] Embedding model preloaded successfully.")
+            await asyncio.to_thread(_backfill_chapter_embeddings)
+        else:
+            print("[START] WARNING: Embedding model failed to load — semantic matching unavailable.")
+
+    asyncio.create_task(_init_model_and_backfill())
 
     print(f"[START] {settings.APP_NAME} v{settings.APP_VERSION} starting...")
     yield
