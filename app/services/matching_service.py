@@ -117,9 +117,10 @@ def build_video_text(
 
 # ─── Matching logic ───────────────────────────────────────────────────────────
 
-# Thresholds
-THRESHOLD_MATCH = 0.60
-THRESHOLD_CONFIRM = 0.45
+# Thresholds — STRICT to avoid false positives
+# e.g. "Spring Boot E-Commerce API" should NOT match "Spring Boot Database Integration JDBC Hibernate"
+THRESHOLD_MATCH = 0.75       # Auto-assign: high confidence match
+THRESHOLD_CONFIRM = 0.65     # Candidate but needs more context to confirm
 
 
 def compute_match(
@@ -201,10 +202,10 @@ def find_best_chapter(
         if sim < THRESHOLD_CONFIRM:
             continue
 
-        # Scoring: raw similarity + bonus for incomplete chapters
+        # Scoring: raw similarity + small tiebreaker bonus for incomplete chapters
         score = sim
         if not ch["is_completed"]:
-            score += 0.15  # Prefer incomplete chapters
+            score += 0.05  # Small tiebreaker — prefer incomplete when sims are close
 
         if score > best_sim:
             best_sim = score

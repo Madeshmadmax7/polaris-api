@@ -394,12 +394,14 @@ def update_chapter_progress(
     
     # ALLOW RE-WATCHING: Track time even for completed chapters (analytics)
     # But NEVER reduce watched_seconds on completed chapters (preserves progress bar)
+    was_already_completed = progress.is_completed
     if progress.is_completed:
         progress.watched_seconds = max(progress.watched_seconds, watched_seconds)
     else:
         progress.watched_seconds = watched_seconds
     
     # Auto-complete if video ended OR watched >= 95% of video
+    just_completed = False
     if progress.video_duration_seconds > 0:
         watch_percentage = (progress.watched_seconds / progress.video_duration_seconds) * 100
         
@@ -407,6 +409,7 @@ def update_chapter_progress(
         if (video_ended or watch_percentage >= 95) and not progress.is_completed:
             progress.is_completed = True
             progress.completed_at = datetime.now(timezone.utc)
+            just_completed = True
             print(f"[Chapter Complete] {progress.chapter_title} - {'Video ended' if video_ended else f'{watch_percentage:.1f}% watched'}")
             
             # Check if all chapters completed
@@ -431,7 +434,9 @@ def update_chapter_progress(
         "watched_seconds": progress.watched_seconds,
         "video_duration_seconds": progress.video_duration_seconds,
         "progress_percentage": min((progress.watched_seconds / progress.video_duration_seconds * 100), 100) if progress.video_duration_seconds > 0 else 0,
-        "is_completed": progress.is_completed
+        "is_completed": progress.is_completed,
+        "just_completed": just_completed,
+        "was_already_completed": was_already_completed
     }
 
 
@@ -525,6 +530,54 @@ def set_chapter_video(
         "watched_seconds": progress.watched_seconds
     }
 
+
+@router.post("/study-plan/{plan_id}/chapter/{chapter_number}/reset")
+def reset_chapter_video(
+    plan_id: str,
+    chapter_number: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Reset a chapter's video assignment and progress.
+    Clears: youtube_url, youtube_title, creator_name, watched_seconds, completion status.
+    Preserves: chapter_title, chapter_embedding, keyword_importance (plan structure).
+    """
+    progress = db.query(ChapterProgress).filter(
+        ChapterProgress.study_plan_id == plan_id,
+        ChapterProgress.user_id == user.id,
+        ChapterProgress.chapter_index == chapter_number,
+    ).first()
+    
+    if not progress:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+    
+    old_title = progress.youtube_title or progress.youtube_url or "(no video)"
+    
+    # Clear video assignment
+    progress.youtube_url = None
+    progress.youtube_title = None
+    progress.creator_name = None
+    progress.video_duration_seconds = 0
+    
+    # Clear progress
+    progress.watched_seconds = 0
+    progress.is_completed = False
+    progress.completed_at = None
+    
+    # Un-unlock quiz if it was unlocked (since a chapter is now incomplete)
+    plan = db.query(StudyPlan).filter(StudyPlan.id == plan_id).first()
+    if plan and plan.quiz_unlocked:
+        plan.quiz_unlocked = False
+    
+    db.commit()
+    
+    print(f"[Chapter Reset] Chapter {chapter_number} '{progress.chapter_title}': cleared video '{old_title}'")
+    
+    return {
+        "success": True,
+        "message": f"Chapter {chapter_number} reset — video cleared, progress zeroed",
+        "chapter_title": progress.chapter_title,
+    }
 
 # ═══════════════════════════════════════════════════════════
 #  PENDING CHAPTER ASSIGNMENT (for "Search on YouTube" button)
