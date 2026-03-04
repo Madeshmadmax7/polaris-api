@@ -1,8 +1,3 @@
-"""
-LifeOS – Tracking Routes
-Activity log ingestion from extension (single + batch).
-"""
-
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks

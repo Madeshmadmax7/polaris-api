@@ -107,18 +107,24 @@ Your job is to create study plans with curated YouTube video chapters and assess
 
 CRITICAL: Respond ONLY with a valid JSON object. No markdown formatting, no code blocks."""
 
+    # Dynamic targets based on duration
+    chapters_target = max(duration_days, min(int(duration_days * 1.8), 30))
+    quiz_target = max(10, min(40, duration_days * 3))
+
     user_prompt = f"""Create a complete learning plan for this goal:
 
 **Goal:** {goal}
 **Duration:** {duration_days} days
+**Required chapters:** {chapters_target}
+**Required quiz questions:** {quiz_target}
 
 {context_section}
 
 Respond with this EXACT JSON structure (no markdown, no code blocks):
 
 {{
-    "title": "Concise title for the plan",
-    "overview": "Brief 2-3 sentence overview",
+    "title": "{goal}",
+    "overview": "Brief 2-3 sentence overview of what will be learned",
     "chapters": [
         {{
             "chapter_number": 1,
@@ -142,16 +148,27 @@ Respond with this EXACT JSON structure (no markdown, no code blocks):
             "correct_answer": 0,
             "explanation": "Why this answer is correct"
         }}
+    ],
+    "daily_schedule": [
+        {{
+            "day": 1,
+            "chapters": [1, 2],
+            "estimated_time_minutes": 60,
+            "topics_focus": "Short description of day's focus"
+        }}
     ]
 }}
 
 REQUIREMENTS:
-1. Generate 3-8 chapters based on content complexity
+1. Generate EXACTLY {chapters_target} chapters spread logically across {duration_days} days (more chapters = deeper coverage)
 2. For youtube_search_query: Create search-friendly query with + separators (e.g., "dynamic+programming+introduction")
-3. Generate 5-10 quiz questions covering all chapters
-4. Quiz questions should test understanding, not just recall
+3. Generate EXACTLY {quiz_target} quiz questions covering all chapters evenly
+4. Quiz questions should test understanding and application, not just recall — include tricky edge cases
 5. Each question has 4 options, correct_answer is index (0-3)
 6. Make search queries specific enough to find quality educational content
+7. Generate daily_schedule with one entry per day ({duration_days} entries total), distributing chapters across days
+8. estimated_time_minutes should reflect real learning time: each video chapter ~30-60 min
+9. CRITICAL: "title" field MUST be exactly: {goal} — do not paraphrase, rename, or shorten it
 
 IMPORTANT KEYWORD IMPORTANCE:
 - For each chapter, analyze the title words and assign importance scores (0-100)
@@ -166,7 +183,7 @@ IMPORTANT: Use youtube_search_query (not youtube_url) - system will auto-detect 
     response = _call_llm([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
-    ], temperature=0.6, max_tokens=4000)
+    ], temperature=0.6, max_tokens=max(5000, chapters_target * 350 + quiz_target * 180 + 1500))
 
     # Parse JSON response
     try:
@@ -185,16 +202,33 @@ IMPORTANT: Use youtube_search_query (not youtube_url) - system will auto-detect 
             plan["chapters"] = []
         if "quiz" not in plan:
             plan["quiz"] = []
-        if "title" not in plan:
-            plan["title"] = goal[:100]
+        # Always use exact user input as title — never let LLM paraphrase it
+        plan["title"] = goal
         if "overview" not in plan:
             plan["overview"] = f"Study plan for {goal}"
+        if "daily_schedule" not in plan:
+            plan["daily_schedule"] = []
+        # Fallback: auto-build schedule if LLM skipped it
+        if not plan["daily_schedule"] and plan["chapters"]:
+            import math
+            chs = plan["chapters"]
+            per_day = math.ceil(len(chs) / duration_days)
+            plan["daily_schedule"] = [
+                {
+                    "day": d + 1,
+                    "chapters": [chs[i]["chapter_number"] for i in range(d * per_day, min((d + 1) * per_day, len(chs)))],
+                    "estimated_time_minutes": (min((d + 1) * per_day, len(chs)) - d * per_day) * 45,
+                    "topics_focus": f"Day {d + 1} learning"
+                }
+                for d in range(duration_days) if d * per_day < len(chs)
+            ]
             
     except json.JSONDecodeError as e:
         # Fallback structure
         plan = {
-            "title": goal[:100],
+            "title": goal,
             "overview": f"Study plan for {goal}",
+            "daily_schedule": [],
             "chapters": [
                 {
                     "chapter_number": 1,
