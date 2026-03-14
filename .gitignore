@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+*.log
+lifeos.db
+faiss_indices/

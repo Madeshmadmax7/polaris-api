@@ -1,0 +1,35 @@
+# Core
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-dotenv==1.0.1
+pydantic==2.6.1
+pydantic-settings==2.1.0
+email-validator==2.1.0
+
+# Database
+sqlalchemy==2.0.27
+pymysql==1.1.0
+cryptography==42.0.2
+alembic==1.13.1
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+
+# AI / RAG
+openai==1.12.0
+groq==0.4.2
+sentence-transformers==2.3.1
+faiss-cpu==1.7.4
+PyPDF2==3.0.1
+tiktoken==0.6.0
+
+# WebSockets
+websockets==12.0
+
+# Utilities
+python-multipart==0.0.9
+httpx==0.26.0
+aiofiles==23.2.1
+apscheduler==3.10.4
