@@ -253,3 +253,27 @@ class DomainCategoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ═══════════════════════════════════════════════════════════
+#  INTEGRATIONS: GOOGLE CALENDAR & NOTION
+# ═══════════════════════════════════════════════════════════
+
+class GoogleCalendarAuthRequest(BaseModel):
+    code: str = Field(..., description="OAuth authorization code")
+
+
+class SyncStudySessionRequest(BaseModel):
+    title: str = Field(..., min_length=1)
+    start_time: datetime
+    end_time: datetime
+    description: Optional[str] = None
+    study_plan_id: Optional[str] = None
+
+
+class SyncDeadlineRequest(BaseModel):
+    title: str = Field(..., min_length=1)
+    deadline: datetime
+    description: Optional[str] = None
+    study_plan_id: Optional[str] = None
+    chapter_id: Optional[str] = None

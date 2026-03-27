@@ -231,6 +231,7 @@ class StudyPlan(Base):
     duration_days = Column(Integer)
     document_id = Column(String(36), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
     quiz_unlocked = Column(Boolean, default=False)  # Unlocked after all chapters completed
+    
     created_at = Column(DateTime, default=utcnow)
 
     user = relationship("User", back_populates="study_plans")
@@ -306,3 +307,11 @@ class Notification(Base):
     __table_args__ = (
         Index("idx_notification_user_read", "user_id", "is_read"),
     )
+
+
+    user = relationship("User")
+
+
+# ═══════════════════════════════════════════════════════════
+# END MODELS
+# ═══════════════════════════════════════════════════════════

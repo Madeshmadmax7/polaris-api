@@ -3,8 +3,14 @@ LifeOS – Application Configuration
 Environment-driven settings with sensible defaults.
 """
 
+from pathlib import Path
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+# Get the absolute path to the backend directory (.env is in backend directory)
+BACKEND_DIR = Path(__file__).parent.parent.parent  # .../backend/
+ENV_FILE = BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -59,9 +65,17 @@ class Settings(BaseSettings):
     # ── WebSocket ────────────────────────────────────────
     WS_HEARTBEAT_INTERVAL: int = 5
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # ── Google OAuth 2.0 (for Calendar Integration) ──────
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    GOOGLE_CLIENT_SECRET: Optional[str] = None
+    GOOGLE_REDIRECT_URI: Optional[str] = None
+    ENCRYPTION_KEY: Optional[str] = None
+
+    model_config = ConfigDict(
+        env_file=str(ENV_FILE),  # Use absolute path to .env
+        env_file_encoding="utf-8",
+        extra="ignore"  # Ignore extra env vars not defined in Settings
+    )
 
 
 settings = Settings()

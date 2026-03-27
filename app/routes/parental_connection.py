@@ -902,3 +902,47 @@ def get_child_study_plan_progress(
         "completed_chapters": sum(1 for p in progress if p.is_completed),
         "quiz_unlocked": plan.quiz_unlocked,
     }
+
+
+@router.get("/child/{child_id}/study-plan/{plan_id}/quiz-attempts")
+def get_child_quiz_attempts(
+    child_id: str,
+    plan_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Parent views linked child's quiz attempts for a study plan."""
+    _ensure_parent_child_access(db, user.id, child_id)
+
+    plan = db.query(StudyPlan).filter(
+        StudyPlan.id == plan_id,
+        StudyPlan.user_id == child_id,
+    ).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Study plan not found")
+
+    attempts = db.query(QuizAttempt).filter(
+        QuizAttempt.study_plan_id == plan_id,
+        QuizAttempt.user_id == child_id,
+    ).order_by(QuizAttempt.created_at.desc()).all()
+
+    return {
+        "success": True,
+        "plan_id": plan_id,
+        "quiz_unlocked": plan.quiz_unlocked,
+        "total_questions": len(plan.plan_data.get("quiz", [])) if plan.plan_data else 0,
+        "attempts": [
+            {
+                "id": a.id,
+                "score": round(a.score, 1),
+                "max_score": round(a.max_score, 1),
+                "percentage": round((a.score / a.max_score * 100) if a.max_score > 0 else 0, 1),
+                "correct_answers": int(a.score) if hasattr(a, 'score') else 0,
+                "total_questions": len(a.questions) if a.questions else 0,
+                "difficulty": a.difficulty,
+                "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in attempts
+        ],
+    }
