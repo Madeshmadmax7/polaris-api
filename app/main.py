@@ -242,7 +242,13 @@ async def websocket_endpoint(
         await ws_manager.disconnect(websocket, user_id)
 
 
-# ── Health Check ─────────────────────────────────────────
+# ── Root / Health Check ──────────────────────────────────
+@app.get("/")
+def root():
+    """Root endpoint — Render's health check hits this."""
+    return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
+
+
 @app.get("/health")
 def health_check():
     return {
