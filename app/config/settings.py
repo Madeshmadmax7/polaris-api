@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
     # ── Database ─────────────────────────────────────────
-    DATABASE_URL: str = "sqlite:///./lifeos.db"
+    DATABASE_URL: str = "DATABASE_URL=mysql+pymysql://umfdftqsjjwpprpc:19hDENaCl9QhhO8JNVYe@b4w3wmywgiev6hg1jly2-mysql.services.clever-cloud.com:3306/b4w3wmywgiev6hg1jly2"
 
     # ── AI Providers ─────────────────────────────────────
     OPENAI_API_KEY: Optional[str] = None
@@ -56,6 +56,7 @@ class Settings(BaseSettings):
         "chrome-extension://*",
         "https://www.youtube.com",  # For extension content scripts on YouTube
         "https://youtube.com",
+        "https://polaristracker.netlify.app",
     ]
 
     # ── Server ───────────────────────────────────────────

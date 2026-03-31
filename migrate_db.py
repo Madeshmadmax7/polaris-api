@@ -7,7 +7,11 @@ from sqlalchemy import create_engine, text, inspect
 from app.config.settings import settings
 
 def migrate():
-    engine = create_engine(settings.DATABASE_URL)
+    engine = create_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args={"ssl": {"ssl_disabled": False}}
+)
     inspector = inspect(engine)
     
     with engine.connect() as conn:
