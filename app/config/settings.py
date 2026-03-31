@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
     # ── Database ─────────────────────────────────────────
-    DATABASE_URL: str = "DATABASE_URL=mysql+pymysql://umfdftqsjjwpprpc:19hDENaCl9QhhO8JNVYe@b4w3wmywgiev6hg1jly2-mysql.services.clever-cloud.com:3306/b4w3wmywgiev6hg1jly2"
+    DATABASE_URL: str = "mysql+pymysql://umfdftqsjjwpprpc:19hDENaCl9QhhO8JNVYe@b4w3wmywgiev6hg1jly2-mysql.services.clever-cloud.com:3306/b4w3wmywgiev6hg1jly2"
 
     # ── AI Providers ─────────────────────────────────────
     OPENAI_API_KEY: Optional[str] = None
