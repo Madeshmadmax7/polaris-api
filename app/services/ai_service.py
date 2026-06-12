@@ -326,8 +326,9 @@ Your job is to create study plans with curated YouTube video chapters and assess
 CRITICAL: Respond ONLY with a valid JSON object. No markdown formatting, no code blocks."""
 
     # Dynamic targets based on duration
-    chapters_target = max(duration_days, min(int(duration_days * 1.8), 30))
-    quiz_target = max(10, min(40, duration_days * 3))
+    # Cap aggressively to stay within Groq free-tier token limits (8192 max output)
+    chapters_target = max(duration_days, min(int(duration_days * 1.5), 18))
+    quiz_target = max(8, min(20, duration_days * 2))
 
     difficulty_note = {
         "easy": "Quiz questions should be straightforward — definition-level, direct recall, no trick questions. Beginner-friendly.",
@@ -404,10 +405,14 @@ IMPORTANT KEYWORD IMPORTANCE:
 
 IMPORTANT: Use youtube_search_query (not youtube_url) - system will auto-detect videos user watches."""
 
+    # Cap at 8000 to stay within Groq free-tier output token limit (8192)
+    token_budget = min(8000, chapters_target * 300 + quiz_target * 150 + 1200)
     response = _call_llm([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
-    ], temperature=0.6, max_tokens=max(5000, chapters_target * 350 + quiz_target * 180 + 1500))
+    ], temperature=0.6, max_tokens=token_budget)
+    print(f"[AI] Study plan generation: chapters={chapters_target}, quiz={quiz_target}, max_tokens={token_budget}")
+    print(f"[AI] Raw response length: {len(response)} chars")
 
     # Parse JSON response
     try:
@@ -448,32 +453,76 @@ IMPORTANT: Use youtube_search_query (not youtube_url) - system will auto-detect 
             ]
             
     except json.JSONDecodeError as e:
-        # Fallback structure
-        plan = {
-            "title": goal,
-            "overview": f"Study plan for {goal}",
-            "daily_schedule": [],
-            "chapters": [
-                {
-                    "chapter_number": 1,
-                    "title": "Introduction",
-                    "description": "Getting started with the topic",
-                    "youtube_url": "",
-                    "duration_estimate": "10 min",
-                    "key_topics": ["Basics"]
+        print(f"[AI] JSON parse failed: {e}. Attempting partial salvage...")
+        print(f"[AI] Response tail (last 200 chars): {response[-200:]}")
+
+        # ── Partial salvage: try to extract chapters array from truncated JSON ──
+        plan = None
+        try:
+            import re
+            # Try to find and parse just the chapters array
+            ch_match = re.search(r'"chapters"\s*:\s*(\[.*?\])(?=\s*[,}]|\s*"quiz")', response, re.DOTALL)
+            ov_match = re.search(r'"overview"\s*:\s*"([^"]+)"', response)
+            ds_match = re.search(r'"daily_schedule"\s*:\s*(\[.*?\])(?=\s*[,}])', response, re.DOTALL)
+
+            if ch_match:
+                chapters = json.loads(ch_match.group(1))
+                overview = ov_match.group(1) if ov_match else f"A {duration_days}-day study plan for {goal}"
+                daily_schedule = json.loads(ds_match.group(1)) if ds_match else []
+
+                # Auto-build daily_schedule if missing
+                if not daily_schedule and chapters:
+                    import math
+                    per_day = math.ceil(len(chapters) / duration_days)
+                    daily_schedule = [
+                        {
+                            "day": d + 1,
+                            "chapters": [chapters[i]["chapter_number"] for i in range(d * per_day, min((d + 1) * per_day, len(chapters)))],
+                            "estimated_time_minutes": per_day * 45,
+                            "topics_focus": f"Day {d + 1} learning"
+                        }
+                        for d in range(duration_days) if d * per_day < len(chapters)
+                    ]
+
+                plan = {
+                    "title": goal,
+                    "overview": overview,
+                    "chapters": chapters,
+                    "daily_schedule": daily_schedule,
+                    "quiz": [],  # quiz was truncated — empty is fine, plan still usable
+                    "_salvaged": True,
                 }
-            ],
-            "quiz": [
-                {
-                    "question": "This is a placeholder question",
-                    "options": ["A", "B", "C", "D"],
-                    "correct_answer": 0,
-                    "explanation": "AI generation failed, please try again"
-                }
-            ],
-            "error": f"Failed to parse AI response: {str(e)}",
-            "raw_response": response[:500]
-        }
+                print(f"[AI] Partial salvage succeeded: {len(chapters)} chapters recovered")
+        except Exception as salvage_err:
+            print(f"[AI] Partial salvage also failed: {salvage_err}")
+
+        # ── Hard fallback only if salvage also failed ──
+        if plan is None:
+            plan = {
+                "title": goal,
+                "overview": f"Study plan for {goal}",
+                "daily_schedule": [],
+                "chapters": [
+                    {
+                        "chapter_number": 1,
+                        "title": "Introduction",
+                        "description": "Getting started with the topic",
+                        "youtube_url": "",
+                        "duration_estimate": "10 min",
+                        "key_topics": ["Basics"]
+                    }
+                ],
+                "quiz": [
+                    {
+                        "question": "This is a placeholder question",
+                        "options": ["A", "B", "C", "D"],
+                        "correct_answer": 0,
+                        "explanation": "AI generation failed, please try again"
+                    }
+                ],
+                "error": f"Failed to parse AI response: {str(e)}",
+                "raw_response": response[:500]
+            }
 
     return plan
 
