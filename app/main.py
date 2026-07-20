@@ -1,6 +1,10 @@
 """
 LifeOS – FastAPI Main Application
 Brings together all routes, WebSocket, CORS, and lifecycle events.
+
+[V1] Basic Telemetry + Rule-Based Productivity
+     Only auth, tracking, and productivity routes are active.
+     Advanced features commented out for future versions.
 """
 
 from contextlib import asynccontextmanager
@@ -9,8 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.settings import settings
 from app.config.database import engine, Base
-from app.routes import auth, tracking, productivity, parental, ai, parental_connection, notifications
-from app.websocket.manager import ws_manager, emit_blocked_list_sync
+# [V1] Only core routes active
+from app.routes import auth, tracking, productivity
+# [V2+] Advanced routes — uncomment when ready
+# from app.routes import parental, ai, parental_connection, notifications, knowledge, learning_path, knowledge_gap
+from app.websocket.manager import ws_manager
+# [V2+] Blocked list sync — uncomment when parental controls are enabled
+# from app.websocket.manager import emit_blocked_list_sync
 from app.utils.auth import decode_token
 
 
@@ -34,104 +43,105 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[MIGRATE] page_title column migration skipped: {e}")
 
-        # Migration 2: keyword_importance for chapter_progress
-        chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
-        if 'keyword_importance' not in chapters_columns:
-            try:
-                conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN keyword_importance JSON NULL"))
-                conn.commit()
-                print("[MIGRATE] Added keyword_importance column to chapter_progress")
-            except Exception as e:
-                print(f"[MIGRATE] keyword_importance column migration skipped: {e}")
+        # [V2+] Migration 2: keyword_importance for chapter_progress
+        # chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
+        # if 'keyword_importance' not in chapters_columns:
+        #     try:
+        #         conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN keyword_importance JSON NULL"))
+        #         conn.commit()
+        #         print("[MIGRATE] Added keyword_importance column to chapter_progress")
+        #     except Exception as e:
+        #         print(f"[MIGRATE] keyword_importance column migration skipped: {e}")
 
-        # Migration 3: chapter_embedding for semantic video matching
-        chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
-        if 'chapter_embedding' not in chapters_columns:
-            try:
-                conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN chapter_embedding JSON NULL"))
-                conn.commit()
-                print("[MIGRATE] Added chapter_embedding column to chapter_progress")
-            except Exception as e:
-                print(f"[MIGRATE] chapter_embedding column migration skipped: {e}")
+        # [V2+] Migration 3: chapter_embedding for semantic video matching
+        # chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
+        # if 'chapter_embedding' not in chapters_columns:
+        #     try:
+        #         conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN chapter_embedding JSON NULL"))
+        #         conn.commit()
+        #         print("[MIGRATE] Added chapter_embedding column to chapter_progress")
+        #     except Exception as e:
+        #         print(f"[MIGRATE] chapter_embedding column migration skipped: {e}")
 
-        # Migration 4: playback_rate for video speed tracking
-        chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
-        if 'playback_rate' not in chapters_columns:
-            try:
-                conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN playback_rate FLOAT DEFAULT 1.0"))
-                conn.commit()
-                print("[MIGRATE] Added playback_rate column to chapter_progress")
-            except Exception as e:
-                print(f"[MIGRATE] playback_rate column migration skipped: {e}")
+        # [V2+] Migration 4: playback_rate for video speed tracking
+        # chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
+        # if 'playback_rate' not in chapters_columns:
+        #     try:
+        #         conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN playback_rate FLOAT DEFAULT 1.0"))
+        #         conn.commit()
+        #         print("[MIGRATE] Added playback_rate column to chapter_progress")
+        #     except Exception as e:
+        #         print(f"[MIGRATE] playback_rate column migration skipped: {e}")
 
-        # Migration 5: ai_summary for chapter completion summaries
-        chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
-        if 'ai_summary' not in chapters_columns:
-            try:
-                conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN ai_summary TEXT NULL"))
-                conn.commit()
-                print("[MIGRATE] Added ai_summary column to chapter_progress")
-            except Exception as e:
-                print(f"[MIGRATE] ai_summary column migration skipped: {e}")
+        # [V2+] Migration 5: ai_summary for chapter completion summaries
+        # chapters_columns = [c['name'] for c in inspector.get_columns('chapter_progress')]
+        # if 'ai_summary' not in chapters_columns:
+        #     try:
+        #         conn.execute(text("ALTER TABLE chapter_progress ADD COLUMN ai_summary TEXT NULL"))
+        #         conn.commit()
+        #         print("[MIGRATE] Added ai_summary column to chapter_progress")
+        #     except Exception as e:
+        #         print(f"[MIGRATE] ai_summary column migration skipped: {e}")
 
-    # ── Preload embedding model at startup (runs in background to avoid blocking) ──
+    # [V2+] Preload embedding model at startup (runs in background to avoid blocking)
     # This ensures the server starts immediately while the model loads.
-    import asyncio
-    from app.services import matching_service
+    # import asyncio
+    # from app.services import matching_service
+    #
+    # async def _init_model_and_backfill():
+    #     model_ok = await asyncio.to_thread(matching_service.preload_model)
+    #     if model_ok:
+    #         print("[START] Embedding model preloaded successfully.")
+    #         await asyncio.to_thread(_backfill_chapter_embeddings)
+    #     else:
+    #         print("[START] WARNING: Embedding model failed to load — semantic matching unavailable.")
+    #
+    # asyncio.create_task(_init_model_and_backfill())
 
-    async def _init_model_and_backfill():
-        model_ok = await asyncio.to_thread(matching_service.preload_model)
-        if model_ok:
-            print("[START] Embedding model preloaded successfully.")
-            await asyncio.to_thread(_backfill_chapter_embeddings)
-        else:
-            print("[START] WARNING: Embedding model failed to load — semantic matching unavailable.")
-
-    asyncio.create_task(_init_model_and_backfill())
-
-    print(f"[START] {settings.APP_NAME} v{settings.APP_VERSION} starting...")
+    print(f"[START] {settings.APP_NAME} v{settings.APP_VERSION} (V1 – Telemetry + Productivity) starting...")
     yield
     print(f"[STOP] {settings.APP_NAME} shutting down...")
 
 
-def _backfill_chapter_embeddings():
-    """
-    Generate and store chapter_embedding for any ChapterProgress rows that are missing it.
-    This runs once at startup in a background thread so new deployments self-heal.
-    """
-    from app.config.database import SessionLocal
-    from app.models.models import ChapterProgress
-    from app.services.matching_service import build_chapter_text, embed_text
-
-    db = SessionLocal()
-    try:
-        missing = db.query(ChapterProgress).filter(
-            ChapterProgress.chapter_embedding.is_(None)
-        ).all()
-
-        if not missing:
-            print("[Backfill] All chapters already have embeddings.")
-            return
-
-        print(f"[Backfill] Generating embeddings for {len(missing)} chapters...")
-        updated = 0
-        for ch in missing:
-            text = build_chapter_text(
-                chapter_title=ch.chapter_title,
-                keyword_importance=ch.keyword_importance,
-            )
-            emb = embed_text(text)
-            if emb:
-                ch.chapter_embedding = emb
-                updated += 1
-
-        db.commit()
-        print(f"[Backfill] Done — {updated}/{len(missing)} chapters embedded.")
-    except Exception as e:
-        print(f"[Backfill] Error during embedding backfill: {e}")
-        db.rollback()
-    finally:
-        db.close()
+# [V2+] Embedding backfill — uncomment when AI/NLP features are enabled
+# def _backfill_chapter_embeddings():
+#     """
+#     Generate and store chapter_embedding for any ChapterProgress rows that are missing it.
+#     This runs once at startup in a background thread so new deployments self-heal.
+#     """
+#     from app.config.database import SessionLocal
+#     from app.models.models import ChapterProgress
+#     from app.services.matching_service import build_chapter_text, embed_text
+#
+#     db = SessionLocal()
+#     try:
+#         missing = db.query(ChapterProgress).filter(
+#             ChapterProgress.chapter_embedding.is_(None)
+#         ).all()
+#
+#         if not missing:
+#             print("[Backfill] All chapters already have embeddings.")
+#             return
+#
+#         print(f"[Backfill] Generating embeddings for {len(missing)} chapters...")
+#         updated = 0
+#         for ch in missing:
+#             text = build_chapter_text(
+#                 chapter_title=ch.chapter_title,
+#                 keyword_importance=ch.keyword_importance,
+#             )
+#             emb = embed_text(text)
+#             if emb:
+#                 ch.chapter_embedding = emb
+#                 updated += 1
+#
+#         db.commit()
+#         print(f"[Backfill] Done — {updated}/{len(missing)} chapters embedded.")
+#     except Exception as e:
+#         print(f"[Backfill] Error during embedding backfill: {e}")
+#         db.rollback()
+#     finally:
+#         db.close()
 
 
 app = FastAPI(
@@ -167,13 +177,18 @@ async def log_requests(request, call_next):
     return response
 
 # ── Routes ───────────────────────────────────────────────
+# [V1] Core routes only
 app.include_router(auth.router, prefix="/api")
 app.include_router(tracking.router, prefix="/api")
 app.include_router(productivity.router, prefix="/api")
-app.include_router(parental.router, prefix="/api")
-app.include_router(parental_connection.router, prefix="/api")
-app.include_router(ai.router, prefix="/api")
-app.include_router(notifications.router, prefix="/api")
+# [V2+] Advanced routes — uncomment when ready
+# app.include_router(parental.router, prefix="/api")
+# app.include_router(parental_connection.router, prefix="/api")
+# app.include_router(ai.router, prefix="/api")
+# app.include_router(notifications.router, prefix="/api")
+# app.include_router(knowledge.router, prefix="/api")
+# app.include_router(learning_path.router, prefix="/api")
+# app.include_router(knowledge_gap.router, prefix="/api")
 
 
 # ── WebSocket Endpoint ──────────────────────────────────
@@ -202,15 +217,15 @@ async def websocket_endpoint(
     await ws_manager.connect(websocket, user_id)
 
     try:
-        # Send initial blocked sites sync
-        from app.config.database import SessionLocal
-        from app.services.parental_service import get_blocked_sites
-        db = SessionLocal()
-        try:
-            blocked = get_blocked_sites(db, user_id)
-            await emit_blocked_list_sync(user_id, blocked)
-        finally:
-            db.close()
+        # [V2+] Send initial blocked sites sync — uncomment when parental controls are enabled
+        # from app.config.database import SessionLocal
+        # from app.services.parental_service import get_blocked_sites
+        # db = SessionLocal()
+        # try:
+        #     blocked = get_blocked_sites(db, user_id)
+        #     await emit_blocked_list_sync(user_id, blocked)
+        # finally:
+        #     db.close()
 
         # Listen for messages
         while True:
@@ -219,14 +234,14 @@ async def websocket_endpoint(
 
             if msg_type == "heartbeat":
                 await websocket.send_json({"type": "heartbeat_ack"})
-            elif msg_type == "sync_blocked":
-                # Re-send blocked list
-                db = SessionLocal()
-                try:
-                    blocked = get_blocked_sites(db, user_id)
-                    await emit_blocked_list_sync(user_id, blocked)
-                finally:
-                    db.close()
+            # [V2+] Blocked sites sync — uncomment when parental controls are enabled
+            # elif msg_type == "sync_blocked":
+            #     db = SessionLocal()
+            #     try:
+            #         blocked = get_blocked_sites(db, user_id)
+            #         await emit_blocked_list_sync(user_id, blocked)
+            #     finally:
+            #         db.close()
             elif msg_type == "live_activity":
                 # Extension reporting live browsing - relay to all user connections
                 live_data = data.get("data", {})

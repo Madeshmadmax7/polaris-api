@@ -313,5 +313,312 @@ class Notification(Base):
 
 
 # ═══════════════════════════════════════════════════════════
+#  KNOWLEDGE GRAPH (LCIE — Learning Content Intelligence)
+# ═══════════════════════════════════════════════════════════
+
+class KnowledgeNode(Base):
+    """A concept vertex in the user's personal knowledge graph.
+    Each node represents a single concept (e.g., 'Normalization', 'React Hooks').
+    Nodes are deduplicated by canonical_name per user — never duplicated."""
+    __tablename__ = "knowledge_nodes"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Concept identity
+    name = Column(String(255), nullable=False)              # Display name: "Normalization"
+    canonical_name = Column(String(255), nullable=False)    # Lowercased/normalized for dedup: "normalization"
+    category = Column(String(100), nullable=True)           # "DBMS", "Web Development", "DSA"
+
+    # Graph metadata
+    depth = Column(Integer, default=0)                      # 0=domain, 1=topic, 2=subtopic, 3=detail
+    node_type = Column(String(30), default="concept")       # 'domain' | 'topic' | 'concept' | 'technique' | 'tool'
+
+    # Knowledge state
+    encounter_count = Column(Integer, default=1)            # How many times seen across sources
+    confidence = Column(Float, default=0.0)                 # AI extraction confidence (validated)
+    mastery_level = Column(Float, default=0.0)              # 0.0-1.0, grows with encounters + quiz scores
+    first_seen_at = Column(DateTime, default=utcnow)
+    last_seen_at = Column(DateTime, default=utcnow)
+
+    # Embedding for semantic matching (384-dim from all-MiniLM-L6-v2)
+    embedding = Column(JSON, nullable=True)
+
+    # Raw extracted text snippets (NOT summaries — for on-demand generation)
+    context_snippets = Column(JSON, default=list)           # ["snippet from blog 1", "snippet from blog 2"]
+
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    user = relationship("User")
+
+    __table_args__ = (
+        Index("idx_knode_user_canonical", "user_id", "canonical_name", unique=True),
+        Index("idx_knode_user_category", "user_id", "category"),
+        Index("idx_knode_user_type", "user_id", "node_type"),
+    )
+
+
+class KnowledgeEdge(Base):
+    """A directed relationship between two knowledge nodes.
+    Weight increases with repeated co-occurrence across sources."""
+    __tablename__ = "knowledge_edges"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    source_node_id = Column(String(36), ForeignKey("knowledge_nodes.id", ondelete="CASCADE"), nullable=False)
+    target_node_id = Column(String(36), ForeignKey("knowledge_nodes.id", ondelete="CASCADE"), nullable=False)
+
+    # Relationship semantics
+    relation_type = Column(String(30), nullable=False)      # 'contains' | 'requires' | 'related_to' | 'extends' | 'implements'
+    weight = Column(Float, default=1.0)                     # Reinforced by repeated co-occurrence (max 5.0)
+
+    # Provenance
+    source_count = Column(Integer, default=1)               # How many sources established this edge
+
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    source_node = relationship("KnowledgeNode", foreign_keys=[source_node_id])
+    target_node = relationship("KnowledgeNode", foreign_keys=[target_node_id])
+
+    __table_args__ = (
+        Index("idx_kedge_user_src_tgt", "user_id", "source_node_id", "target_node_id", unique=True),
+        Index("idx_kedge_user_relation", "user_id", "relation_type"),
+    )
+
+
+class KnowledgeSource(Base):
+    """A webpage/article that contributed knowledge to the graph.
+    Stores provenance metadata — not full content. Raw text kept for on-demand summary generation."""
+    __tablename__ = "knowledge_sources"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    url = Column(String(2000), nullable=False)
+    url_hash = Column(String(64), nullable=False)           # SHA-256 of URL for fast dedup
+    domain = Column(String(255), nullable=False)
+    page_title = Column(String(500), nullable=False)
+
+    # Content metadata
+    content_type = Column(String(30), nullable=True)        # 'blog' | 'tutorial' | 'documentation' | 'research' | 'qa' | 'course'
+    detected_language = Column(String(100), nullable=True)  # Programming languages detected (comma-separated)
+    has_code_blocks = Column(Boolean, default=False)
+    estimated_reading_minutes = Column(Integer, default=0)
+
+    # Learning intent (rule-based + AI inferred)
+    learning_intent = Column(String(30), nullable=True)     # 'learning' | 'interview_prep' | 'debugging' | 'revision' | etc.
+
+    # Extraction metadata
+    extraction_method = Column(String(20), default="hybrid") # 'rule_based' | 'ai' | 'hybrid'
+    ai_confidence = Column(Float, default=0.0)
+    raw_extracted_text = Column(Text, nullable=True)         # First 3000 chars for on-demand summary
+    rule_extracted_data = Column(JSON, default=dict)         # {languages: [...], technologies: [...], headings: [...]}
+
+    # Linked nodes (which concepts this source contributed to)
+    node_ids = Column(JSON, default=list)                    # ["node-uuid-1", "node-uuid-2"]
+
+    analyzed_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime, default=utcnow)
+
+    user = relationship("User")
+
+    __table_args__ = (
+        Index("idx_ksource_user_hash", "user_id", "url_hash", unique=True),
+        Index("idx_ksource_user_domain", "user_id", "domain"),
+        Index("idx_ksource_user_intent", "user_id", "learning_intent"),
+        Index("idx_ksource_user_created", "user_id", "created_at"),
+    )
+
+
+class LearningSession(Base):
+    """A learning session linking time-on-page to knowledge nodes.
+    Bridges tracking data with the knowledge graph."""
+    __tablename__ = "learning_sessions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(String(36), ForeignKey("knowledge_sources.id", ondelete="CASCADE"), nullable=False)
+
+    # Time tracking
+    started_at = Column(DateTime, nullable=False, default=utcnow)
+    duration_seconds = Column(Integer, default=0)
+
+    # Learning context
+    learning_intent = Column(String(30), nullable=True)
+    concepts_encountered = Column(JSON, default=list)       # Concept names from this session
+
+    created_at = Column(DateTime, default=utcnow)
+
+    source = relationship("KnowledgeSource")
+    user = relationship("User")
+
+    __table_args__ = (
+        Index("idx_lsession_user_created", "user_id", "created_at"),
+    )
+
+# ═══════════════════════════════════════════════════════════
+#  LEARNING PATH DISCOVERY ENGINE
+# ═══════════════════════════════════════════════════════════
+
+class LearningPath(Base):
+    """An automatically inferred learning path discovered from the knowledge graph.
+    Never manually created — always algorithmically detected."""
+    __tablename__ = "learning_paths"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Path identity
+    path_name = Column(String(255), nullable=False)            # "Backend Development", "Machine Learning"
+    path_slug = Column(String(255), nullable=False)            # Lowercase slug for dedup
+    description = Column(Text, nullable=True)                  # AI-generated description
+
+    # Discovery metadata
+    confidence = Column(Float, default=0.0)                    # 0.0-1.0 how confident is the inference
+    status = Column(String(30), default="growing")             # 'growing' | 'mature' | 'completed' | 'stale'
+    is_primary = Column(Boolean, default=False)                # True if this is the dominant learning path
+
+    # Progress
+    stage = Column(String(30), default="beginner")             # 'beginner' | 'intermediate' | 'advanced' | 'expert'
+    completion_pct = Column(Float, default=0.0)                # 0-100
+    total_concepts = Column(Integer, default=0)
+    mastered_concepts = Column(Integer, default=0)
+
+    # AI-inferred data (stored as JSON)
+    missing_topics = Column(JSON, default=list)                # ["Docker", "Redis", "Kubernetes"]
+    milestone_history = Column(JSON, default=list)             # [{concept, date, order}]
+
+    detected_at = Column(DateTime, default=utcnow)
+    last_updated = Column(DateTime, default=utcnow, onupdate=utcnow)
+    created_at = Column(DateTime, default=utcnow)
+
+    user = relationship("User")
+    path_nodes = relationship("LearningPathNode", back_populates="learning_path", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_lpath_user_slug", "user_id", "path_slug", unique=True),
+        Index("idx_lpath_user_primary", "user_id", "is_primary"),
+        Index("idx_lpath_user_confidence", "user_id", "confidence"),
+    )
+
+
+class LearningPathNode(Base):
+    """Links a knowledge node to a learning path with ordering and importance."""
+    __tablename__ = "learning_path_nodes"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    learning_path_id = Column(String(36), ForeignKey("learning_paths.id", ondelete="CASCADE"), nullable=False, index=True)
+    knowledge_node_id = Column(String(36), ForeignKey("knowledge_nodes.id", ondelete="CASCADE"), nullable=False)
+
+    # Ordering and importance
+    learning_order = Column(Integer, default=0)                # Sequential order in the path
+    importance_score = Column(Float, default=0.5)              # 0.0-1.0 how critical this node is
+
+    # Status
+    is_completed = Column(Boolean, default=False)              # Based on mastery_level threshold
+
+    created_at = Column(DateTime, default=utcnow)
+
+    learning_path = relationship("LearningPath", back_populates="path_nodes")
+    knowledge_node = relationship("KnowledgeNode")
+
+    __table_args__ = (
+        Index("idx_lpnode_path_node", "learning_path_id", "knowledge_node_id", unique=True),
+        Index("idx_lpnode_path_order", "learning_path_id", "learning_order"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  KNOWLEDGE GAP DETECTION ENGINE
+# ═══════════════════════════════════════════════════════════
+
+class KnowledgeGap(Base):
+    """A detected knowledge gap — a missing prerequisite concept
+    inferred from the Knowledge Graph and Learning Paths.
+    Never manually created — always algorithmically or AI-detected."""
+    __tablename__ = "knowledge_gaps"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Gap identity (deduplicated by canonical_concept per user)
+    concept = Column(String(255), nullable=False)               # "HTTP Fundamentals", "NumPy"
+    canonical_concept = Column(String(255), nullable=False)     # Lowered slug for dedup
+    category = Column(String(100), nullable=True)               # "Networking", "Mathematics"
+
+    # Related learning path
+    learning_path_id = Column(String(36), ForeignKey("learning_paths.id", ondelete="SET NULL"), nullable=True)
+    learning_path_name = Column(String(255), nullable=True)     # Denormalized for fast reads
+
+    # Severity & priority
+    severity = Column(Float, default=0.5)                       # 0.0-1.0 how critical the gap is
+    priority = Column(String(20), default="medium")             # 'critical' | 'high' | 'medium' | 'low'
+    confidence = Column(Float, default=0.5)                     # 0.0-1.0 AI detection confidence
+
+    # Gap reason (human-readable)
+    reason = Column(Text, nullable=True)                        # "REST APIs rely heavily on HTTP fundamentals."
+    detection_method = Column(String(30), default="hybrid")     # 'graph' | 'ai' | 'hybrid' | 'prerequisite_chain'
+
+    # Dependency chain (JSON: list of concept names this gap blocks)
+    blocks_concepts = Column(JSON, default=list)                # ["REST API", "Spring Boot"]
+    prerequisite_of = Column(JSON, default=list)                # Which known concepts need this
+
+    # Status lifecycle
+    status = Column(String(20), default="detected")             # 'detected' | 'learning' | 'resolved' | 'dismissed'
+    resolved_at = Column(DateTime, nullable=True)
+
+    # Estimation
+    estimated_study_minutes = Column(Integer, default=30)
+    difficulty = Column(String(20), default="intermediate")     # 'beginner' | 'intermediate' | 'advanced'
+
+    detected_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    user = relationship("User")
+    learning_path = relationship("LearningPath")
+    recommendations = relationship("KnowledgeGapRecommendation", back_populates="gap", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_kgap_user_canonical", "user_id", "canonical_concept", unique=True),
+        Index("idx_kgap_user_status", "user_id", "status"),
+        Index("idx_kgap_user_priority", "user_id", "priority"),
+        Index("idx_kgap_user_severity", "user_id", "severity"),
+        Index("idx_kgap_user_path", "user_id", "learning_path_id"),
+    )
+
+
+class KnowledgeGapRecommendation(Base):
+    """A study recommendation for resolving a knowledge gap.
+    Generated on demand — never stored preemptively unless gap detection runs."""
+    __tablename__ = "knowledge_gap_recommendations"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    gap_id = Column(String(36), ForeignKey("knowledge_gaps.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Recommendation content
+    resource_type = Column(String(30), nullable=False)          # 'tutorial' | 'documentation' | 'video' | 'practice' | 'article'
+    title = Column(String(500), nullable=True)                  # "Learn HTTP Fundamentals"
+    description = Column(Text, nullable=True)                   # Why this resource helps
+    estimated_minutes = Column(Integer, default=30)
+    difficulty = Column(String(20), default="intermediate")
+
+    # Prioritization
+    relevance_score = Column(Float, default=0.5)                # 0.0-1.0 how relevant to closing the gap
+    confidence = Column(Float, default=0.5)
+
+    created_at = Column(DateTime, default=utcnow)
+
+    gap = relationship("KnowledgeGap", back_populates="recommendations")
+
+    __table_args__ = (
+        Index("idx_kgaprec_gap", "gap_id"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
 # END MODELS
 # ═══════════════════════════════════════════════════════════
