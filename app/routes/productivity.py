@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
+from pydantic import BaseModel, Field
 from app.config.database import get_db
 from app.models.models import User, TrackingLog, ChapterProgress, StudyPlan
 from app.utils.auth import get_current_user
@@ -609,4 +610,86 @@ def get_topic_heatmap(
         })
 
     return {"plans": result, "total_plans": len(result)}
+
+
+# ═══════════════════════════════════════════════════════════
+#  FOCUS SESSION & ACTIVE FOCUS BLOCKING CONTROL
+# ═══════════════════════════════════════════════════════════
+
+class FocusSessionRequest(BaseModel):
+    duration_minutes: int = Field(default=25, ge=1, le=180)
+    preset_label: Optional[str] = "25 min"
+
+
+@router.post("/focus-session/start")
+async def start_focus_session(
+    payload: FocusSessionRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Start an active Focus Session:
+    1. Triggers real-time WebSocket event to active Chrome Extensions & Desktop Trackers.
+    2. Enforces blocking on distracting domains (Instagram, Reddit, TikTok, Facebook, Twitter, Shorts).
+    3. Keeps YouTube educational watching UNBLOCKED for study & learning!
+    """
+    distracting_domains = [
+        "instagram.com", "facebook.com", "twitter.com", "x.com",
+        "tiktok.com", "reddit.com", "twitch.tv", "netflix.com",
+        "youtube.com/shorts"  # Only block distracting Shorts, keep main YouTube unblocked for learning
+    ]
+
+    # Save focus mode to DB
+    user.focus_mode_until = datetime.now(timezone.utc) + timedelta(minutes=payload.duration_minutes)
+    db.commit()
+
+    from app.services.parental_service import get_blocked_sites
+    user_blocked = get_blocked_sites(db, user.id)
+
+    # Filter out main youtube.com if present, as user requested YouTube for learning!
+    filtered_blocked = [d for d in user_blocked if d.lower() != "youtube.com"]
+    combined_domains = list(set(distracting_domains + filtered_blocked))
+
+    from app.websocket.manager import ws_manager
+    await ws_manager.send_to_user(user.id, {
+        "type": "focus_session_start",
+        "data": {
+            "duration_minutes": payload.duration_minutes,
+            "preset_label": payload.preset_label,
+            "blocked_domains": combined_domains,
+            "youtube_allowed_for_learning": True,
+        }
+    })
+
+    return {
+        "status": "active",
+        "duration_minutes": payload.duration_minutes,
+        "blocked_domains": combined_domains,
+        "youtube_learning_mode": True,
+    }
+
+
+@router.post("/focus-session/stop")
+async def stop_focus_session(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Stop active Focus Session and restore default site access."""
+    # Clear focus mode from DB
+    user.focus_mode_until = None
+    db.commit()
+
+    from app.websocket.manager import ws_manager
+    from app.services.parental_service import get_blocked_sites
+
+    user_blocked = get_blocked_sites(db, user.id)
+    await ws_manager.send_to_user(user.id, {
+        "type": "focus_session_stop",
+        "data": {
+            "default_blocked": user_blocked,
+        }
+    })
+
+    return {"status": "stopped", "restored_domains": user_blocked}
+
 

@@ -35,6 +35,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="student")  # 'student' | 'parent'
     is_active = Column(Boolean, default=True)
+    focus_mode_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -310,6 +311,142 @@ class Notification(Base):
 
 
     user = relationship("User")
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  LAB IDE — CODING TASKS & SUBMISSIONS
+# ═══════════════════════════════════════════════════════════
+
+class CodingTask(Base):
+    """AI-generated coding challenge linked to a study plan chapter."""
+    __tablename__ = "coding_tasks"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    study_plan_id = Column(String(36), ForeignKey("study_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    chapter_number = Column(Integer, nullable=False)
+    task_index = Column(Integer, nullable=False, default=0)  # order within chapter
+
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    difficulty = Column(String(20), default="easy")  # 'easy' | 'medium' | 'hard'
+    language = Column(String(20), default="python")  # 'python' | 'javascript'
+    starter_code = Column(Text, default="")
+    solution = Column(Text, default="")
+
+    # Structured test cases: [{"input": str, "expected_output": str}]
+    test_cases = Column(JSON, default=list)
+    # Hints: ["hint1", "hint2"]
+    hints = Column(JSON, default=list)
+
+    created_at = Column(DateTime, default=utcnow)
+
+    study_plan = relationship("StudyPlan", foreign_keys=[study_plan_id])
+
+    __table_args__ = (
+        Index("idx_coding_task_plan_chapter", "study_plan_id", "chapter_number"),
+    )
+
+
+class CodingSubmission(Base):
+    """Student code submission for a coding task, with verification results."""
+    __tablename__ = "coding_submissions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    task_id = Column(String(36), ForeignKey("coding_tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    code = Column(Text, nullable=False)
+    language = Column(String(20), default="python")
+    passed = Column(Boolean, default=False)
+    score = Column(Integer, default=0)  # 0-100
+    total_tests = Column(Integer, default=0)
+    passed_tests = Column(Integer, default=0)
+    # Detailed results: [{"input": str, "expected": str, "actual": str, "passed": bool}]
+    test_results = Column(JSON, default=list)
+    # AI feedback (for complex tasks without simple I/O tests)
+    ai_feedback = Column(Text, default="")
+    execution_time_ms = Column(Float, default=0.0)
+
+    created_at = Column(DateTime, default=utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    task = relationship("CodingTask", foreign_keys=[task_id])
+
+    __table_args__ = (
+        Index("idx_submission_user_task", "user_id", "task_id"),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  GAMIFICATION & SKILL TREE
+# ═══════════════════════════════════════════════════════════
+
+class SkillNode(Base):
+    """Dynamic skill tree node."""
+    __tablename__ = "skill_nodes"
+    id = Column(String(50), primary_key=True)  # e.g. 'html-css'
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    lucide_icon = Column(String(50))
+    color = Column(String(20))
+    tier = Column(Integer)
+    prerequisites = Column(JSON, default=list)
+    connections = Column(JSON, default=list)
+    
+    subtopics = relationship("SkillSubtopic", back_populates="node", cascade="all, delete-orphan")
+
+
+class SkillSubtopic(Base):
+    """Subtopics for a skill node."""
+    __tablename__ = "skill_subtopics"
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    node_id = Column(String(50), ForeignKey("skill_nodes.id", ondelete="CASCADE"))
+    name = Column(String(100), nullable=False)
+    keywords = Column(JSON, default=list)
+    
+    node = relationship("SkillNode", back_populates="subtopics")
+
+
+class Achievement(Base):
+    """Available badges to unlock."""
+    __tablename__ = "achievements"
+    id = Column(String(50), primary_key=True)  # e.g. 'deep_work_demon'
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    icon = Column(String(50))
+    color = Column(String(20))
+    xp_reward = Column(Integer, default=50)
+    criteria_type = Column(String(50))  # 'productive_hours', 'streak_days', 'mastered_skills'
+    criteria_value = Column(Integer)
+
+
+class UserAchievement(Base):
+    """Badges earned by users."""
+    __tablename__ = "user_achievements"
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    achievement_id = Column(String(50), ForeignKey("achievements.id", ondelete="CASCADE"))
+    unlocked_at = Column(DateTime, default=utcnow)
+    
+    __table_args__ = (
+        Index("idx_user_achievements", "user_id", "achievement_id", unique=True),
+    )
+
+
+class DailyQuest(Base):
+    """Auto-generated daily quests for a user."""
+    __tablename__ = "daily_quests"
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    date = Column(DateTime)
+    quest_type = Column(String(50))
+    title = Column(String(255))
+    target_value = Column(Integer)
+    current_value = Column(Integer, default=0)
+    xp_reward = Column(Integer, default=20)
+    is_completed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=utcnow)
 
 
 # ═══════════════════════════════════════════════════════════

@@ -83,11 +83,26 @@ def compute_daily_summary(
         TrackingLog.timestamp < day_end,
     ).all()
 
-    productive_seconds = sum(l.duration_seconds for l in logs if l.category == "productive")
-    neutral_seconds = sum(l.duration_seconds for l in logs if l.category == "neutral")
-    distracting_seconds = sum(l.duration_seconds for l in logs if l.category == "distracting")
-    total_active = sum(l.duration_seconds for l in logs)
-    total_tabs = sum(l.tab_switches for l in logs)
+    productive_seconds = 0
+    neutral_seconds = 0
+    distracting_seconds = 0
+    total_active = 0
+    total_tabs = 0
+
+    for l in logs:
+        total_active += l.duration_seconds
+        total_tabs += l.tab_switches
+
+        if l.category == "productive":
+            # Engagement penalty: idle reading on web gets 50% productive weight
+            if not l.domain.startswith("desktop://") and l.scroll_depth == 0 and l.tab_switches == 0:
+                productive_seconds += int(l.duration_seconds * 0.5)
+            else:
+                productive_seconds += l.duration_seconds
+        elif l.category == "neutral":
+            neutral_seconds += l.duration_seconds
+        elif l.category == "distracting":
+            distracting_seconds += l.duration_seconds
 
     # Get quiz average for the day
     quiz_avg = db.query(func.avg(QuizAttempt.score)).filter(
@@ -116,7 +131,7 @@ def compute_daily_summary(
         TrackingLog.timestamp < day_end,
     ).group_by(TrackingLog.domain, TrackingLog.category).order_by(
         func.sum(TrackingLog.duration_seconds).desc()
-    ).limit(10).all()
+    ).limit(30).all()
 
     top_domains = [{"domain": d.domain, "category": d.category, "seconds": int(d.secs)} for d in domain_data]
 

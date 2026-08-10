@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, 
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
-from app.models.models import User, StudyPlan, ChapterProgress, QuizAttempt
+from app.models.models import User, StudyPlan, ChapterProgress, QuizAttempt, CodingTask
 from app.schemas.schemas import (
     DocumentResponse,
     StudyPlanRequest, StudyPlanResponse,
@@ -174,6 +174,25 @@ async def create_study_plan(
             print(f"[Embedding] Batch embedding failed: {e}")
     else:
         print("[Embedding] Model not available — chapters stored without embeddings")
+
+    # ── Persist coding tasks from AI-generated plan ──
+    for chapter in chapters:
+        coding_tasks = chapter.get("coding_tasks", [])
+        for idx, ct in enumerate(coding_tasks):
+            task = CodingTask(
+                study_plan_id=plan.id,
+                chapter_number=chapter.get("chapter_number", 0),
+                task_index=idx,
+                title=ct.get("title", f"Task {idx + 1}"),
+                description=ct.get("description", ""),
+                difficulty=ct.get("difficulty", "easy"),
+                language=ct.get("language", "python"),
+                starter_code=ct.get("starter_code", ""),
+                solution=ct.get("solution", ""),
+                test_cases=ct.get("test_cases", []),
+                hints=ct.get("hints", []),
+            )
+            db.add(task)
 
     db.commit()
     return StudyPlanResponse.model_validate(plan)

@@ -363,7 +363,23 @@ Respond with this EXACT JSON structure (no markdown, no code blocks):
                 "topic_word_2": 90,
                 "generic_word": 30,
                 "channel_name": 10
-            }}
+            }},
+            "coding_tasks": [
+                {{
+                    "task_id": "ch1_task1",
+                    "title": "Implement the concept",
+                    "description": "Clear task description with expected behavior",
+                    "difficulty": "easy",
+                    "language": "python",
+                    "starter_code": "def solution(n):\n    # Your code here\n    pass",
+                    "test_cases": [
+                        {{"input": "5", "expected_output": "10"}},
+                        {{"input": "0", "expected_output": "0"}}
+                    ],
+                    "hints": ["Think about the base case", "Try iteration"],
+                    "solution": "def solution(n):\n    return n * 2"
+                }}
+            ]
         }}
     ],
     "quiz": [
@@ -394,6 +410,10 @@ REQUIREMENTS:
 7. Generate daily_schedule with one entry per day ({duration_days} entries total), distributing chapters across days
 8. estimated_time_minutes should reflect real learning time: each video chapter ~30-60 min
 9. CRITICAL: "title" field MUST be exactly: {goal} — do not paraphrase, rename, or shorten it
+10. Generate 1-2 coding_tasks PER chapter that test the chapter's core concepts
+11. Each coding task MUST have a function-based starter_code, at least 2 test_cases with input/expected_output, 1-2 hints, and a working solution
+12. Test case inputs should be function arguments (e.g., "5" or "[1,2,3]"), expected_output is the return value as a string
+13. Use Python as default language unless the topic is web/frontend-specific (then use JavaScript)
 
 IMPORTANT KEYWORD IMPORTANCE:
 - For each chapter, analyze the title words and assign importance scores (0-100)
@@ -405,8 +425,9 @@ IMPORTANT KEYWORD IMPORTANCE:
 
 IMPORTANT: Use youtube_search_query (not youtube_url) - system will auto-detect videos user watches."""
 
-    # Cap at 8000 to stay within Groq free-tier output token limit (8192)
-    token_budget = min(8000, chapters_target * 300 + quiz_target * 150 + 1200)
+    # Increase budget to accommodate coding_tasks in each chapter
+    coding_tasks_budget = chapters_target * 250  # ~250 tokens per coding task
+    token_budget = min(8000, chapters_target * 300 + quiz_target * 150 + coding_tasks_budget + 1200)
     response = _call_llm([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -736,3 +757,31 @@ Provide a clear, detailed answer grounded in the context above."""
         "sources": [{"snippet": c[:200]} for c in context.split("\n\n---\n\n")],
         "confidence": min(0.9, len(context) / 1000),  # Rough confidence estimate
     }
+
+def classify_desktop_app(app_name: str, window_title: str) -> str:
+    """
+    Use NLP to classify an unknown desktop application.
+    Returns: 'productive', 'distracting', or 'neutral'.
+    """
+    system_prompt = """You are a productivity classification AI for a desktop tracker.
+Classify the given desktop application and window title into exactly one of these categories:
+- productive: Software development tools, IDEs, databases, study materials, office suites.
+- distracting: Games, social media, entertainment, streaming.
+- neutral: Utilities, generic tools, settings, browsers (if not clearly productive/distracting).
+
+Respond with ONLY the exact word: productive, distracting, or neutral. No other text."""
+
+    user_prompt = f"App Name: {app_name}\nWindow Title: {window_title}"
+    
+    try:
+        answer = _call_llm([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ], temperature=0.1, max_tokens=10)
+        
+        result = answer.strip().lower()
+        if result in ("productive", "distracting", "neutral"):
+            return result
+        return "neutral"
+    except Exception:
+        return "neutral"

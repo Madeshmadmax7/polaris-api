@@ -16,7 +16,14 @@ from app.services.tracking_service import (
 from app.services.productivity_service import compute_daily_summary
 from app.models.models import DomainCategory
 
+from pydantic import BaseModel
+
+class AppClassificationRequest(BaseModel):
+    app_name: str
+    window_title: str
+
 router = APIRouter(prefix="/tracking", tags=["Activity Tracking"])
+
 
 
 @router.post("/log", response_model=TrackingLogResponse, status_code=201)
@@ -187,3 +194,32 @@ def debug_recent_logs(
         "timestamp": l.timestamp.isoformat() if l.timestamp else None,
     } for l in logs]
 
+
+@router.post("/classify-app")
+def classify_app(
+    data: AppClassificationRequest,
+    user: User = Depends(get_current_user),
+):
+    """Dynamically classify an unknown desktop application using NLP."""
+    from app.services.ai_service import classify_desktop_app
+    category = classify_desktop_app(data.app_name, data.window_title)
+    return {"category": category}
+
+
+@router.get("/blocked-apps")
+def get_blocked_apps(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get blocked apps/sites for the current user (used by desktop agent)."""
+    from app.services.parental_service import get_blocked_sites
+    blocked = get_blocked_sites(db, user.id)
+    
+    is_focus = False
+    if user.focus_mode_until and user.focus_mode_until.tzinfo is None:
+        user.focus_mode_until = user.focus_mode_until.replace(tzinfo=timezone.utc)
+    
+    if user.focus_mode_until and user.focus_mode_until > datetime.now(timezone.utc):
+        is_focus = True
+
+    return {"blocked_apps": blocked, "focus_mode_active": is_focus}

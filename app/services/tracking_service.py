@@ -5,6 +5,7 @@ Handles activity log ingestion with privacy filtering and category resolution.
 
 from datetime import datetime, timezone
 from typing import List, Optional
+from functools import lru_cache
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -51,8 +52,26 @@ DEFAULT_CATEGORIES = {
 }
 
 
+_defaults_seeded = False
+
 def resolve_category(domain: str, db: Session, user_id: str) -> str:
     """Resolve domain category: user override > global > default > neutral."""
+    global _defaults_seeded
+    if not _defaults_seeded:
+        try:
+            # Seed defaults as global if they don't exist
+            for pat, cat in DEFAULT_CATEGORIES.items():
+                exists = db.query(DomainCategory).filter(
+                    DomainCategory.domain_pattern == pat, 
+                    DomainCategory.is_global == True
+                ).first()
+                if not exists:
+                    db.add(DomainCategory(domain_pattern=pat, category=cat, is_global=True, user_id="system"))
+            db.commit()
+        except Exception:
+            db.rollback()
+        _defaults_seeded = True
+
     # Check user-specific override
     user_cat = db.query(DomainCategory).filter(
         DomainCategory.domain_pattern == domain,
@@ -87,24 +106,34 @@ def ingest_tracking_log(
     log_data: TrackingLogCreate,
 ) -> TrackingLog:
     """Ingest a single tracking log with privacy filtering and category resolution."""
-    domain = sanitize_url(f"https://{log_data.domain}")
-    if not domain:
-        domain = log_data.domain  # Fallback if already a clean hostname
-
-    category = resolve_category(domain, db, user_id)
-
-    # Smart YouTube classification — three-tier override:
-    # 1. Trust the extension's real-time classification if provided (most accurate).
-    # 2. Fall back to title keyword matching.
-    # 3. Otherwise keep domain default.
     page_title = getattr(log_data, 'page_title', None)
     yt_cls = getattr(log_data, 'yt_classification', None)
-    if domain in ('youtube.com', 'youtu.be'):
-        if yt_cls in ('productive', 'neutral', 'distracting'):
-            # Extension already classified this video — trust it directly.
-            category = yt_cls
-        elif page_title and category == 'distracting' and _is_learning_video(page_title):
-            category = 'productive'
+
+    # ── Desktop Activity (sent by the desktop_tracker Python agent) ──────────
+    # Domain format: "desktop://Visual Studio Code"
+    # The tracker pre-classifies via yt_classification, so we skip
+    # URL sanitisation and domain-based category lookup entirely.
+    if log_data.domain.startswith("desktop://"):
+        domain = log_data.domain
+        category = yt_cls if yt_cls in ('productive', 'neutral', 'distracting') else 'neutral'
+    else:
+        # ── Web Activity (sent by the Chrome extension) ───────────────────────
+        domain = sanitize_url(f"https://{log_data.domain}")
+        if not domain:
+            domain = log_data.domain  # Fallback if already a clean hostname
+
+        category = resolve_category(domain, db, user_id)
+
+        # Smart YouTube classification — three-tier override:
+        # 1. Trust the extension's real-time classification if provided (most accurate).
+        # 2. Fall back to title keyword matching.
+        # 3. Otherwise keep domain default.
+        if domain in ('youtube.com', 'youtu.be'):
+            if yt_cls in ('productive', 'neutral', 'distracting'):
+                # Extension already classified this video — trust it directly.
+                category = yt_cls
+            elif page_title and category == 'distracting' and _is_learning_video(page_title):
+                category = 'productive'
 
     log = TrackingLog(
         user_id=user_id,
@@ -160,11 +189,34 @@ LEARNING_KEYWORDS = [
     'campus', 'semester', 'university', 'college', 'syllabus',
 ]
 
+GAMING_KEYWORDS = [
+    'gameplay', 'walkthrough', 'speedrun', "let's play", 'playthrough', 'montage', 'highlights',
+    'gta', 'valorant', 'minecraft', 'roblox', 'fortnite', 'apex legends', 'warzone', 'cod', 'csgo'
+]
+
+@lru_cache(maxsize=1000)
+def _ai_classify_youtube(title: str) -> bool:
+    try:
+        from app.services.ai_service import classify_desktop_app
+        return classify_desktop_app("YouTube Video", title) == "productive"
+    except Exception:
+        return False
+
 
 def _is_learning_video(title: str) -> bool:
     """Check if a YouTube video title indicates educational content."""
     lower_title = title.lower()
-    return any(keyword in lower_title for keyword in LEARNING_KEYWORDS)
+    
+    # Fast reject if it has gaming keywords
+    if any(keyword in lower_title for keyword in GAMING_KEYWORDS):
+        return False
+        
+    # Fast accept if it has strong learning keywords
+    if any(keyword in lower_title for keyword in LEARNING_KEYWORDS):
+        return True
+        
+    # LLM semantic fallback
+    return _ai_classify_youtube(title)
 
 
 def ingest_batch(
@@ -233,8 +285,12 @@ def get_domain_breakdown(
             "visit_count": r.visit_count,
         }
 
-        # Get recent page titles for this domain (YouTube videos)
-        if r.domain in ('youtube.com', 'youtu.be'):
+        # Get recent page titles for this domain (YouTube videos OR desktop windows)
+        is_youtube = r.domain in ('youtube.com', 'youtu.be')
+        is_desktop = r.domain.startswith('desktop://')
+
+        if is_youtube or is_desktop:
+            title_key = "videos" if is_youtube else "windows"
             title_query = db.query(
                 TrackingLog.page_title,
                 func.sum(TrackingLog.duration_seconds).label("seconds"),
@@ -255,7 +311,7 @@ def get_domain_breakdown(
                 func.sum(TrackingLog.duration_seconds).desc()
             ).limit(5).all()
 
-            entry["videos"] = [
+            entry[title_key] = [
                 {"title": t.page_title, "seconds": t.seconds}
                 for t in title_query_results
             ]

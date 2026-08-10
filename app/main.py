@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.settings import settings
 from app.config.database import engine, Base
-from app.routes import auth, tracking, productivity, parental, ai, parental_connection, notifications
+from app.routes import auth, tracking, productivity, parental, ai, parental_connection, notifications, lab, gamification
 from app.websocket.manager import ws_manager, emit_blocked_list_sync
 from app.utils.auth import decode_token
 
@@ -74,6 +74,16 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[MIGRATE] ai_summary column migration skipped: {e}")
 
+        # Migration 6: focus_mode_until for users
+        users_columns = [c['name'] for c in inspector.get_columns('users')]
+        if 'focus_mode_until' not in users_columns:
+            try:
+                conn.execute(text("ALTER TABLE users ADD COLUMN focus_mode_until DATETIME NULL"))
+                conn.commit()
+                print("[MIGRATE] Added focus_mode_until column to users")
+            except Exception as e:
+                print(f"[MIGRATE] focus_mode_until column migration skipped: {e}")
+
     # ── Preload embedding model at startup (runs in background to avoid blocking) ──
     # This ensures the server starts immediately while the model loads.
     import asyncio
@@ -86,6 +96,15 @@ async def lifespan(app: FastAPI):
             await asyncio.to_thread(_backfill_chapter_embeddings)
         else:
             print("[START] WARNING: Embedding model failed to load — semantic matching unavailable.")
+
+        # Seed gamification config
+        from app.config.database import SessionLocal
+        from app.services.gamification_service import seed_gamification_db
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(seed_gamification_db, db)
+        finally:
+            db.close()
 
     asyncio.create_task(_init_model_and_backfill())
 
@@ -174,6 +193,8 @@ app.include_router(parental.router, prefix="/api")
 app.include_router(parental_connection.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
+app.include_router(gamification.router, prefix="/api")
+app.include_router(lab.router)
 
 
 # ── WebSocket Endpoint ──────────────────────────────────
