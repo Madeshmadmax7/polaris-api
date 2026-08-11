@@ -58,6 +58,7 @@ class VerificationResponse(BaseModel):
     score: int
     total_tests: int
     passed_tests: int
+    test_results: list = []
     failed_tests: list = []
     feedback: str
     ai_review: Optional[str] = None
@@ -75,7 +76,7 @@ class CodingTaskResponse(BaseModel):
     language: str
     starter_code: str
     hints: list = []
-    # Don't expose solution or test case expected outputs
+    sample_test_cases: list = []  # Visible sample cases (input & expected_output)
     test_count: int = 0
     best_score: Optional[int] = None
     solved: bool = False
@@ -143,6 +144,18 @@ async def get_chapter_tasks(
             CodingSubmission.user_id == user.id,
         ).order_by(CodingSubmission.score.desc()).first()
 
+        raw_cases = task.test_cases or []
+        # Expose sample cases (up to 3 non-hidden ones)
+        sample_cases = [
+            {"input": str(tc.get("input", "")), "expected_output": str(tc.get("expected_output", ""))}
+            for tc in raw_cases if not tc.get("is_hidden", False)
+        ]
+        if not sample_cases and raw_cases:
+            sample_cases = [
+                {"input": str(tc.get("input", "")), "expected_output": str(tc.get("expected_output", ""))}
+                for tc in raw_cases[:3]
+            ]
+
         result.append(CodingTaskResponse(
             id=task.id,
             chapter_number=task.chapter_number,
@@ -153,7 +166,56 @@ async def get_chapter_tasks(
             language=task.language,
             starter_code=task.starter_code,
             hints=task.hints or [],
-            test_count=len(task.test_cases or []),
+            sample_test_cases=sample_cases,
+            test_count=len(raw_cases),
+            best_score=best_submission.score if best_submission else None,
+            solved=best_submission.passed if best_submission else False,
+        ))
+
+    return result
+
+
+@router.get("/plan-tasks/{plan_id}", response_model=List[CodingTaskResponse])
+async def get_plan_tasks(
+    plan_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get all coding tasks for an entire study plan across all chapters."""
+    tasks = db.query(CodingTask).filter(
+        CodingTask.study_plan_id == plan_id,
+    ).order_by(CodingTask.chapter_number, CodingTask.task_index).all()
+
+    result = []
+    for task in tasks:
+        best_submission = db.query(CodingSubmission).filter(
+            CodingSubmission.task_id == task.id,
+            CodingSubmission.user_id == user.id,
+        ).order_by(CodingSubmission.score.desc()).first()
+
+        raw_cases = task.test_cases or []
+        sample_cases = [
+            {"input": str(tc.get("input", "")), "expected_output": str(tc.get("expected_output", ""))}
+            for tc in raw_cases if not tc.get("is_hidden", False)
+        ]
+        if not sample_cases and raw_cases:
+            sample_cases = [
+                {"input": str(tc.get("input", "")), "expected_output": str(tc.get("expected_output", ""))}
+                for tc in raw_cases[:3]
+            ]
+
+        result.append(CodingTaskResponse(
+            id=task.id,
+            chapter_number=task.chapter_number,
+            task_index=task.task_index,
+            title=task.title,
+            description=task.description,
+            difficulty=task.difficulty,
+            language=task.language,
+            starter_code=task.starter_code,
+            hints=task.hints or [],
+            sample_test_cases=sample_cases,
+            test_count=len(raw_cases),
             best_score=best_submission.score if best_submission else None,
             solved=best_submission.passed if best_submission else False,
         ))
@@ -171,48 +233,56 @@ async def submit_code(
     Submit code for automated verification against a coding task.
     Runs test cases and optionally AI review. Returns detailed results.
     """
-    task = db.query(CodingTask).filter(CodingTask.id == payload.task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Coding task not found")
+    try:
+        task = db.query(CodingTask).filter(CodingTask.id == payload.task_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Coding task not found")
 
-    # Run verification
-    vr = await verify_code(
-        user_code=payload.code,
-        test_cases=task.test_cases or [],
-        task_description=task.description,
-        solution=task.solution or "",
-        language=payload.language or task.language,
-    )
+        # Run verification
+        vr = await verify_code(
+            user_code=payload.code,
+            test_cases=task.test_cases or [],
+            task_description=task.description,
+            solution=task.solution or "",
+            language=payload.language or task.language,
+        )
 
-    # Persist submission
-    submission = CodingSubmission(
-        user_id=user.id,
-        task_id=task.id,
-        code=payload.code,
-        language=payload.language or task.language,
-        passed=vr.passed,
-        score=vr.score,
-        total_tests=vr.total_tests,
-        passed_tests=vr.passed_tests,
-        test_results=vr.failed_tests,
-        ai_feedback=vr.ai_review or "",
-        execution_time_ms=vr.execution_time_ms,
-    )
-    db.add(submission)
-    db.commit()
-    db.refresh(submission)
+        # Persist submission
+        submission = CodingSubmission(
+            user_id=user.id,
+            task_id=task.id,
+            code=payload.code,
+            language=payload.language or task.language,
+            passed=vr.passed,
+            score=vr.score,
+            total_tests=vr.total_tests,
+            passed_tests=vr.passed_tests,
+            test_results=vr.test_results,
+            ai_feedback=vr.ai_review or "",
+            execution_time_ms=vr.execution_time_ms,
+        )
+        db.add(submission)
+        db.commit()
+        db.refresh(submission)
 
-    return VerificationResponse(
-        submission_id=submission.id,
-        passed=vr.passed,
-        score=vr.score,
-        total_tests=vr.total_tests,
-        passed_tests=vr.passed_tests,
-        failed_tests=vr.failed_tests,
-        feedback=vr.feedback,
-        ai_review=vr.ai_review,
-        execution_time_ms=vr.execution_time_ms,
-    )
+        return VerificationResponse(
+            submission_id=submission.id,
+            passed=vr.passed,
+            score=vr.score,
+            total_tests=vr.total_tests,
+            passed_tests=vr.passed_tests,
+            test_results=vr.test_results,
+            failed_tests=vr.failed_tests,
+            feedback=vr.feedback,
+            ai_review=vr.ai_review,
+            execution_time_ms=vr.execution_time_ms,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Verification error: {str(e)}")
 
 
 @router.get("/submissions/{task_id}", response_model=List[SubmissionHistoryItem])

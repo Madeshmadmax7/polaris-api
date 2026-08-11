@@ -270,6 +270,11 @@ async def regenerate_study_plan(
         ChapterProgress.user_id == user.id,
     ).delete()
 
+    # Delete old coding tasks and rebuild
+    db.query(CodingTask).filter(
+        CodingTask.study_plan_id == plan_id,
+    ).delete()
+
     chapters = plan_data.get("chapters", [])
     chapter_progress_list = []
     for chapter in chapters:
@@ -284,6 +289,25 @@ async def regenerate_study_plan(
         )
         db.add(cp)
         chapter_progress_list.append((cp, chapter))
+
+    # Persist coding tasks from regenerated chapters
+    for chapter in chapters:
+        coding_tasks = chapter.get("coding_tasks", [])
+        for idx, ct in enumerate(coding_tasks):
+            task = CodingTask(
+                study_plan_id=plan.id,
+                chapter_number=chapter.get("chapter_number", 0),
+                task_index=idx,
+                title=ct.get("title", f"Task {idx + 1}"),
+                description=ct.get("description", ""),
+                difficulty=ct.get("difficulty", "easy"),
+                language=ct.get("language", "python"),
+                starter_code=ct.get("starter_code", ""),
+                solution=ct.get("solution", ""),
+                test_cases=ct.get("test_cases", []),
+                hints=ct.get("hints", []),
+            )
+            db.add(task)
 
     # Batch-generate embeddings for new chapters
     model = _matching.get_model()
